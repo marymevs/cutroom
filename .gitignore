@@ -1,0 +1,9 @@
+.env
+*.json
+!cors.json
+/tmp/
+cutroom
+*.mp4
+*.mov
+*.avi
+*.mkv

@@ -1,0 +1,138 @@
+{{define "content"}}
+<div class="project-workspace" id="workspace">
+
+  <div class="workspace-header">
+    <a href="/" class="back">← Projects</a>
+    <h2>{{.Name}}</h2>
+    <span class="badge status-{{.Status}}">{{.Status}}</span>
+  </div>
+
+  <!-- STEP 1: Upload Clips -->
+  <section class="step" id="step-upload">
+    <div class="step-label">01 / Upload Clips</div>
+    <div class="step-body">
+      <div class="upload-zone"
+           hx-post="/projects/{{.ID}}/upload"
+           hx-encoding="multipart/form-data"
+           hx-target="#clips-list"
+           hx-swap="innerHTML"
+           hx-trigger="drop"
+           ondragover="this.classList.add('drag-over'); event.preventDefault()"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="this.classList.remove('drag-over'); handleDrop(event, this)">
+        <div class="upload-icon">⬆</div>
+        <p>Drop video files here</p>
+        <p class="upload-sub">or</p>
+        <label class="btn-secondary" for="clip-file-input">Choose files</label>
+        <input id="clip-file-input" type="file" accept="video/*" multiple
+               style="display:none"
+               onchange="uploadFiles(this, '/projects/{{.ID}}/upload', '#clips-list')" />
+      </div>
+
+      <div id="clips-list">
+        {{template "clips_partial.html" .}}
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 2: Analyze -->
+  {{if .Clips}}
+  <section class="step" id="step-analyze">
+    <div class="step-label">02 / Analyze & Transcribe</div>
+    <div class="step-body">
+      <p class="step-desc">Claude will transcribe all clips with Whisper, then review the transcript as an editor — flagging filler words, pacing issues, and surfacing the best reel moments.</p>
+      <button class="btn-primary"
+              hx-post="/projects/{{.ID}}/analyze"
+              hx-target="#analysis-results"
+              hx-indicator="#analyze-spinner">
+        Run Analysis
+      </button>
+      <span id="analyze-spinner" class="htmx-indicator spinner">Analyzing…</span>
+    </div>
+  </section>
+  {{end}}
+
+  <!-- Analysis results (populated after analyze) -->
+  <div id="analysis-results">
+    {{if .Analysis}}
+    {{template "analysis_partial.html" .}}
+    {{end}}
+  </div>
+
+  <!-- STEP 3: Edit Instructions -->
+  {{if .Analysis}}
+  <section class="step" id="step-instruct">
+    <div class="step-label">03 / Edit Instructions</div>
+    <div class="step-body">
+      <p class="step-desc">Tell the tool how to edit this video in plain language. Claude will merge your instructions with the analysis to build the edit plan.</p>
+      <textarea name="instructions" id="instructions-input"
+                placeholder="e.g. Start with the intro clip, add a title card 'The History', then cut to the main interview. Keep the energy high — cut anything that drags. Use the best reel moment for the Short."
+                rows="5"></textarea>
+      <button class="btn-primary"
+              hx-post="/projects/{{.ID}}/instruct"
+              hx-target="#manifest-results"
+              hx-vals="js:{instructions: document.getElementById('instructions-input').value}"
+              hx-indicator="#instruct-spinner">
+        Build Edit Plan
+      </button>
+      <span id="instruct-spinner" class="htmx-indicator spinner">Building plan…</span>
+    </div>
+  </section>
+  {{end}}
+
+  <!-- Manifest preview (populated after instruct) -->
+  <div id="manifest-results">
+    {{if .Manifest}}
+    {{template "manifest_partial.html" .}}
+    {{end}}
+  </div>
+
+  <!-- STEP 4: Render -->
+  {{if .Manifest}}
+  <section class="step" id="step-render">
+    <div class="step-label">04 / Render</div>
+    <div class="step-body">
+      <p class="step-desc">FFmpeg executes the edit plan. You'll get a finished video, a vertical reel, and an SRT caption file.</p>
+      <button class="btn-primary render-btn"
+              hx-post="/projects/{{.ID}}/render"
+              hx-target="#render-status"
+              hx-indicator="#render-spinner">
+        Render Video
+      </button>
+      <span id="render-spinner" class="htmx-indicator spinner">Rendering…</span>
+      <div id="render-status"
+           hx-get="/projects/{{.ID}}/status"
+           hx-trigger="every 3s [document.querySelector('.render-btn') && document.querySelector('#render-status').dataset.polling === 'true']"
+           hx-swap="outerHTML">
+      </div>
+    </div>
+  </section>
+  {{end}}
+
+  <!-- Downloads (shown when done) -->
+  {{if eq .Status "done"}}
+  <section class="step step-done" id="step-download">
+    <div class="step-label">Done ✓</div>
+    <div class="step-body downloads">
+      {{if .OutputURL}}<a href="/projects/{{.ID}}/download?type=video" class="download-btn" download>Download Final Video</a>{{end}}
+      {{if .ReelsURL}}<a href="/projects/{{.ID}}/download?type=reel" class="download-btn reel" download>Download Reel (9:16)</a>{{end}}
+      {{if .CaptionURL}}<a href="/projects/{{.ID}}/download?type=captions" class="download-btn captions" download>Download Captions (.srt)</a>{{end}}
+
+      {{if .Analysis}}
+      <div class="titles-box">
+        <h3>Title Options</h3>
+        {{range .Analysis.SuggestedTitles}}
+        <div class="title-option">{{.}}</div>
+        {{end}}
+        <h3>Description</h3>
+        <p class="description-text">{{.Analysis.Description}}</p>
+      </div>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+
+</div>
+
+<script src="/static/js/upload.js"></script>
+{{end}}

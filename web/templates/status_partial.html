@@ -1,0 +1,14 @@
+{{define "status_partial.html"}}
+<div id="render-status"
+     data-polling="{{if eq .Status "rendering"}}true{{else}}false{{end}}"
+     hx-get="/projects/{{.ID}}/status"
+     hx-trigger="{{if eq .Status "rendering"}}every 3s{{else}}none{{end}}"
+     hx-swap="outerHTML">
+  <span class="status-msg status-{{.Status}}">
+    {{if eq .Status "rendering"}}Rendering in progress…{{end}}
+    {{if eq .Status "done"}}Done! Refresh to download.{{end}}
+    {{if eq .Status "error"}}Error: {{.Error}}{{end}}
+    {{if eq .Status "analyzing"}}Analyzing…{{end}}
+  </span>
+</div>
+{{end}}

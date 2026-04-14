@@ -1,0 +1,37 @@
+{{define "manifest_partial.html"}}
+{{if .Manifest}}
+<section class="manifest-panel">
+  <div class="step-label">Edit Plan Ready</div>
+
+  <div class="manifest-timeline">
+    {{range .Manifest.Segments}}
+    <div class="timeline-segment">
+      <span class="seg-order">{{.Order}}</span>
+      <span class="seg-clip">{{.ClipID}}</span>
+      <span class="seg-range">{{printf "%.1f" .Start}}s – {{printf "%.1f" .End}}s</span>
+    </div>
+    {{range $.Manifest.TitleCards}}
+    {{if eq .AfterSegment $.Order}}
+    <div class="timeline-card">
+      <span class="card-icon">T</span>
+      <span class="card-text">"{{.Text}}"</span>
+      <span class="card-dur">{{printf "%.0f" .Duration}}s</span>
+    </div>
+    {{end}}
+    {{end}}
+    {{end}}
+  </div>
+
+  {{if .Manifest.ReelSegment}}
+  <div class="reel-preview">
+    <span class="reel-label">Reel</span>
+    <span>{{printf "%.1f" .Manifest.ReelSegment.Start}}s → {{printf "%.1f" .Manifest.ReelSegment.End}}s</span>
+  </div>
+  {{end}}
+
+  {{if .Manifest.OutputCuts}}
+  <p class="cuts-summary">{{len .Manifest.OutputCuts}} cuts confirmed</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

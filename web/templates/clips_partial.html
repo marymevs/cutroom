@@ -1,0 +1,16 @@
+{{define "clips_partial.html"}}
+{{if .Clips}}
+<ul class="clips-list">
+  {{range .Clips}}
+  <li class="clip-item">
+    <span class="clip-icon">🎬</span>
+    <span class="clip-name">{{.Name}}</span>
+    {{if .Duration}}<span class="clip-duration">{{printf "%.1f" .Duration}}s</span>{{end}}
+    <span class="clip-status">{{if .Transcript}}transcribed{{else}}uploaded{{end}}</span>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="empty-state">No clips yet.</p>
+{{end}}
+{{end}}

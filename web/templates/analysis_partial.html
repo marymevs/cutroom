@@ -1,0 +1,42 @@
+{{define "analysis_partial.html"}}
+{{if .Analysis}}
+<section class="analysis-panel">
+  <div class="step-label">Analysis Complete</div>
+
+  {{if .Analysis.SuggestedCuts}}
+  <div class="analysis-section">
+    <h3>Suggested Cuts <span class="count">{{len .Analysis.SuggestedCuts}}</span></h3>
+    <div class="cuts-list">
+      {{range .Analysis.SuggestedCuts}}
+      <div class="cut-row">
+        <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
+        <span class="cut-reason">{{.Reason}}</span>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .Analysis.ReelMoments}}
+  <div class="analysis-section">
+    <h3>Reel Moments <span class="count">{{len .Analysis.ReelMoments}}</span></h3>
+    {{range .Analysis.ReelMoments}}
+    <div class="reel-row">
+      <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
+      <span class="reel-hook">{{.Hook}}</span>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{if .Analysis.SuggestedTitles}}
+  <div class="analysis-section">
+    <h3>Title Suggestions</h3>
+    {{range .Analysis.SuggestedTitles}}
+    <div class="title-option">{{.}}</div>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}
+{{end}}

@@ -1,0 +1,23 @@
+{{define "content"}}
+<div class="hero">
+  <h1>Your edit suite.<br><em>Minus the timeline.</em></h1>
+  <p class="sub">Upload your clips. Get a title, captions, reels, and a finished video — with AI doing the editorial heavy lifting.</p>
+
+  <form hx-post="/projects" hx-target="body" class="new-project-form">
+    <input type="text" name="name" placeholder="Name this project (e.g. Jimmy Choo Deep Dive)" autocomplete="off" />
+    <button type="submit" class="btn-primary">Start Project →</button>
+  </form>
+</div>
+
+{{if .projects}}
+<section class="projects-list">
+  <h2>Recent Projects</h2>
+  {{range .projects}}
+  <a href="/projects/{{.ID}}" class="project-card">
+    <span class="project-name">{{.Name}}</span>
+    <span class="project-status status-{{.Status}}">{{.Status}}</span>
+  </a>
+  {{end}}
+</section>
+{{end}}
+{{end}}
