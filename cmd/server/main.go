@@ -42,11 +42,13 @@ func main() {
 	r.Get("/", h.Index)
 	r.Post("/projects", h.CreateProject)
 	r.Get("/projects/{id}", h.GetProject)
-	r.Post("/projects/{id}/upload", h.UploadClip)
+	r.Post("/projects/{id}/clips/sign", h.SignClipUpload)
+	r.Post("/projects/{id}/clips/register", h.RegisterClip)
 	r.Post("/projects/{id}/analyze", h.AnalyzeClips)
 	r.Post("/projects/{id}/instruct", h.SubmitInstructions)
 	r.Post("/projects/{id}/render", h.RenderVideo)
 	r.Get("/projects/{id}/status", h.GetStatus)
+	r.Get("/projects/{id}/analysis-status", h.GetAnalysisStatus)
 	r.Get("/projects/{id}/download", h.DownloadResult)
 
 	// Serve static files

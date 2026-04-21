@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/mary/cutroom/internal/editor"
+	"github.com/mary/cutroom/internal/domain"
 )
 
 type AnthropicClient struct {
@@ -79,7 +79,7 @@ func (c *AnthropicClient) complete(ctx context.Context, system, user string) (st
 }
 
 // AnalyzeTranscript reviews the full transcript and returns editorial suggestions.
-func (c *AnthropicClient) AnalyzeTranscript(ctx context.Context, proj *editor.Project, transcript string) (*editor.Analysis, error) {
+func (c *AnthropicClient) AnalyzeTranscript(ctx context.Context, proj *domain.Project, transcript string) (*domain.Analysis, error) {
 	system := `You are an expert YouTube video editor and producer. You will be given a timestamped transcript from one or more video clips. Your job is to:
 1. Identify sections to cut: filler words (um, uh, like), repeated content, pacing lags (long pauses, rambling), awkward stumbles.
 2. Identify 1-3 moments that would make great Reels/Shorts (compelling hooks, punchy statements, peak energy moments).
@@ -138,14 +138,14 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 		nameToID[c.Name] = c.ID
 	}
 
-	analysis := &editor.Analysis{
+	analysis := &domain.Analysis{
 		SuggestedTitles: result.SuggestedTitles,
 		Description:     result.Description,
 		RawTranscript:   transcript,
 	}
 
 	for _, sc := range result.SuggestedCuts {
-		analysis.SuggestedCuts = append(analysis.SuggestedCuts, editor.SuggestedCut{
+		analysis.SuggestedCuts = append(analysis.SuggestedCuts, domain.SuggestedCut{
 			ClipID: nameToID[sc.ClipName],
 			Start:  sc.Start,
 			End:    sc.End,
@@ -153,7 +153,7 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 		})
 	}
 	for _, rm := range result.ReelMoments {
-		analysis.ReelMoments = append(analysis.ReelMoments, editor.ReelMoment{
+		analysis.ReelMoments = append(analysis.ReelMoments, domain.ReelMoment{
 			ClipID: nameToID[rm.ClipName],
 			Start:  rm.Start,
 			End:    rm.End,
@@ -165,7 +165,7 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 }
 
 // BuildManifest takes user instructions + analysis and builds a complete EditManifest.
-func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *editor.Project, instructions string) (*editor.EditManifest, error) {
+func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Project, instructions string) (*domain.EditManifest, error) {
 	// Summarize what we know about the project for context
 	var clipsInfo strings.Builder
 	for _, clip := range proj.Clips {
@@ -248,10 +248,10 @@ Editor instructions:
 		return nil, fmt.Errorf("parse manifest JSON: %w\nraw: %s", err, raw)
 	}
 
-	manifest := &editor.EditManifest{}
+	manifest := &domain.EditManifest{}
 
 	for _, s := range result.Segments {
-		manifest.Segments = append(manifest.Segments, editor.Segment{
+		manifest.Segments = append(manifest.Segments, domain.Segment{
 			ClipID: s.ClipID,
 			Start:  s.Start,
 			End:    s.End,
@@ -259,7 +259,7 @@ Editor instructions:
 		})
 	}
 	for _, tc := range result.TitleCards {
-		manifest.TitleCards = append(manifest.TitleCards, editor.TitleCard{
+		manifest.TitleCards = append(manifest.TitleCards, domain.TitleCard{
 			AfterSegment: tc.AfterSegment,
 			Text:         tc.Text,
 			Duration:     tc.Duration,
@@ -267,14 +267,14 @@ Editor instructions:
 		})
 	}
 	for _, oc := range result.OutputCuts {
-		manifest.OutputCuts = append(manifest.OutputCuts, editor.Cut{
+		manifest.OutputCuts = append(manifest.OutputCuts, domain.Cut{
 			ClipID: oc.ClipID,
 			Start:  oc.Start,
 			End:    oc.End,
 		})
 	}
 	if result.ReelSegment != nil {
-		manifest.ReelSegment = &editor.ReelSegment{
+		manifest.ReelSegment = &domain.ReelSegment{
 			ClipID: result.ReelSegment.ClipID,
 			Start:  result.ReelSegment.Start,
 			End:    result.ReelSegment.End,

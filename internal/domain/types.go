@@ -1,4 +1,4 @@
-package editor
+package domain
 
 // Status values for a project
 type Status string
@@ -16,16 +16,16 @@ const (
 
 // Project is the top-level unit of work.
 type Project struct {
-	ID           string
-	Name         string
-	Status       Status
-	Error        string
-	Clips        []Clip
-	Analysis     *Analysis    // populated after Analyze()
-	Manifest     *EditManifest // populated after BuildManifest()
-	OutputURL    string       // GCS signed URL for final video
-	ReelsURL     string       // GCS signed URL for reel clip
-	CaptionURL   string       // GCS signed URL for .srt file
+	ID         string
+	Name       string
+	Status     Status
+	Error      string
+	Clips      []Clip
+	Analysis   *Analysis     // populated after Analyze()
+	Manifest   *EditManifest // populated after BuildManifest()
+	OutputURL  string        // GCS signed URL for final video
+	ReelsURL   string        // GCS signed URL for reel clip
+	CaptionURL string        // GCS signed URL for .srt file
 }
 
 // Clip is a single uploaded video file.

@@ -1,14 +1,17 @@
 package editor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/mary/cutroom/internal/ai"
+	"github.com/mary/cutroom/internal/domain"
 	"github.com/mary/cutroom/internal/gcs"
 	"github.com/mary/cutroom/internal/transcribe"
 )
@@ -30,7 +33,7 @@ func NewPipeline(g *gcs.Client, t *transcribe.WhisperClient, a *ai.AnthropicClie
 }
 
 // Analyze downloads clips, probes duration, transcribes, and runs AI editorial review.
-func (p *Pipeline) Analyze(proj *Project) error {
+func (p *Pipeline) Analyze(proj *domain.Project) error {
 	ctx := context.Background()
 
 	var fullTranscript strings.Builder
@@ -73,17 +76,17 @@ func (p *Pipeline) Analyze(proj *Project) error {
 	}
 
 	proj.Analysis = analysis
-	proj.Status = StatusAnalyzed
+	proj.Status = domain.StatusAnalyzed
 	return nil
 }
 
 // BuildManifest combines user free-text instructions + analysis into a structured edit plan.
-func (p *Pipeline) BuildManifest(ctx context.Context, proj *Project, instructions string) (*EditManifest, error) {
+func (p *Pipeline) BuildManifest(ctx context.Context, proj *domain.Project, instructions string) (*domain.EditManifest, error) {
 	return p.ai.BuildManifest(ctx, proj, instructions)
 }
 
 // Render executes the EditManifest through FFmpeg and uploads results to GCS.
-func (p *Pipeline) Render(proj *Project) error {
+func (p *Pipeline) Render(proj *domain.Project) error {
 	ctx := context.Background()
 	m := proj.Manifest
 	if m == nil {
@@ -105,10 +108,12 @@ func (p *Pipeline) Render(proj *Project) error {
 	if err != nil {
 		return fmt.Errorf("build ffmpeg command: %w", err)
 	}
+	var stderr bytes.Buffer
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", strings.Join(cmd.Args, " "))
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ffmpeg render: %w", err)
+		return fmt.Errorf("ffmpeg render: %w\n%s", err, tailLines(stderr.String(), 30))
 	}
 
 	// 3. Cut reel if specified
@@ -149,7 +154,7 @@ func (p *Pipeline) Render(proj *Project) error {
 
 // buildFFmpegCommand constructs an FFmpeg filter_complex command from the manifest.
 // It handles: clip trimming, title card overlays, cross-fade transitions.
-func buildFFmpegCommand(proj *Project, m *EditManifest, outPath string) (*exec.Cmd, error) {
+func buildFFmpegCommand(proj *domain.Project, m *domain.EditManifest, outPath string) (*exec.Cmd, error) {
 	clipPaths := make(map[string]string)
 	for _, clip := range proj.Clips {
 		clipPaths[clip.ID] = filepath.Join(os.Getenv("WORK_DIR"), proj.ID, clip.ID+filepath.Ext(clip.Name))
@@ -178,23 +183,30 @@ func buildFFmpegCommand(proj *Project, m *EditManifest, outPath string) (*exec.C
 	var filterParts []string
 	var concatInputs []string
 
+	const (
+		targetW  = 1920
+		targetH  = 1080
+		targetSR = 48000
+	)
+	vNorm := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p", targetW, targetH, targetW, targetH)
+	aNorm := fmt.Sprintf("aresample=%d,aformat=sample_fmts=fltp:channel_layouts=stereo", targetSR)
+
 	for i, seg := range m.Segments {
 		idx := segInputMap[seg.Order]
-		filterParts = append(filterParts, fmt.Sprintf("[%d:v]setpts=PTS-STARTPTS[v%d]", idx, i))
-		filterParts = append(filterParts, fmt.Sprintf("[%d:a]asetpts=PTS-STARTPTS[a%d]", idx, i))
+		filterParts = append(filterParts, fmt.Sprintf("[%d:v]setpts=PTS-STARTPTS,%s[v%d]", idx, vNorm, i))
+		filterParts = append(filterParts, fmt.Sprintf("[%d:a]asetpts=PTS-STARTPTS,%s[a%d]", idx, aNorm, i))
 		concatInputs = append(concatInputs, fmt.Sprintf("[v%d][a%d]", i, i))
 
 		// Insert title card after this segment if specified
 		for _, tc := range m.TitleCards {
 			if tc.AfterSegment == i {
-				// Generate a black video with drawtext for the title card
 				cardFilter := fmt.Sprintf(
-					"color=c=black:s=1920x1080:d=%.1f[card%d_raw];[card%d_raw]drawtext=text='%s':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2[card%d]",
-					tc.Duration, i, i, escapeFfmpegText(tc.Text), i,
+					"color=c=black:s=%dx%d:d=%.1f:r=30,drawtext=text='%s':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2,setsar=1,format=yuv420p[card%d]",
+					targetW, targetH, tc.Duration, escapeFfmpegText(tc.Text), i,
 				)
 				silenceFilter := fmt.Sprintf(
-					"aevalsrc=0:d=%.1f[card%d_audio]",
-					tc.Duration, i,
+					"aevalsrc=0:d=%.1f:s=%d,aformat=sample_fmts=fltp:channel_layouts=stereo[card%d_audio]",
+					tc.Duration, targetSR, i,
 				)
 				filterParts = append(filterParts, cardFilter, silenceFilter)
 				concatInputs = append(concatInputs, fmt.Sprintf("[card%d][card%d_audio]", i, i))
@@ -220,7 +232,7 @@ func buildFFmpegCommand(proj *Project, m *EditManifest, outPath string) (*exec.C
 	return exec.Command("ffmpeg", args...), nil
 }
 
-func cutReel(proj *Project, rs *ReelSegment, outPath string) error {
+func cutReel(proj *domain.Project, rs *domain.ReelSegment, outPath string) error {
 	var clipPath string
 	for _, c := range proj.Clips {
 		if c.ID == rs.ClipID {
@@ -262,7 +274,7 @@ func probeDuration(path string) (float64, error) {
 	return d, nil
 }
 
-func writeSRT(proj *Project, path string) error {
+func writeSRT(proj *domain.Project, path string) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -296,4 +308,12 @@ func escapeFfmpegText(s string) string {
 	s = strings.ReplaceAll(s, "'", "\\'")
 	s = strings.ReplaceAll(s, ":", "\\:")
 	return s
+}
+
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) <= n {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }
