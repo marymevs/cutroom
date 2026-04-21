@@ -18,11 +18,8 @@
     <div class="step-label">01 / Upload Clips</div>
     <div class="step-body">
       <div class="upload-zone"
-           hx-post="/projects/{{.ID}}/upload"
-           hx-encoding="multipart/form-data"
-           hx-target="#clips-list"
-           hx-swap="innerHTML"
-           hx-trigger="drop"
+           data-project-id="{{.ID}}"
+           data-list-target="#clips-list"
            ondragover="this.classList.add('drag-over'); event.preventDefault()"
            ondragleave="this.classList.remove('drag-over')"
            ondrop="this.classList.remove('drag-over'); handleDrop(event, this)">
@@ -32,7 +29,7 @@
         <label class="btn-secondary" for="clip-file-input">Choose files</label>
         <input id="clip-file-input" type="file" accept="video/*" multiple
                style="display:none"
-               onchange="uploadFiles(this, '/projects/{{.ID}}/upload', '#clips-list')" />
+               onchange="uploadFiles(this, '{{.ID}}', '#clips-list')" />
       </div>
 
       <div id="clips-list">
