@@ -1,0 +1,21 @@
+{{define "analysis_status_partial.html"}}
+{{if eq .Status "analyzed"}}
+  {{template "analysis_partial.html" .}}
+{{else}}
+<div id="analysis-status"
+     class="analysis-status status-{{.Status}}"
+     hx-get="/projects/{{.ID}}/analysis-status"
+     hx-trigger="{{if eq .Status "analyzing"}}every 2s{{else}}none{{end}}"
+     hx-swap="outerHTML">
+  {{if eq .Status "analyzing"}}
+    <div class="analysis-status-msg">Analyzing…</div>
+    <div class="analysis-status-sub">Transcribing clips with Whisper, then Claude reviews the transcript. This can take a minute or two.</div>
+  {{else if eq .Status "error"}}
+    <div class="error-detail status-error">
+      <strong>Analysis failed.</strong>
+      <pre>{{.Error}}</pre>
+    </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}

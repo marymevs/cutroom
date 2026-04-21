@@ -1,0 +1,27 @@
+{{define "music_partial.html"}}
+<div id="music-panel" class="music-panel">
+  {{if .Music}}
+    <div class="music-attached">
+      <span class="music-icon">♪</span>
+      <span class="music-name">{{.Music.Name}}</span>
+      <button class="btn-link music-remove"
+              hx-delete="/projects/{{.ID}}/music"
+              hx-target="#music-panel"
+              hx-swap="outerHTML">Remove</button>
+    </div>
+    <p class="music-sub">Claude will duck this under voice and bring it up during title cards. You can describe the feel in Step 03 (e.g. "keep music subtle under the interview, swell on the chapter card").</p>
+  {{else}}
+    <form hx-post="/projects/{{.ID}}/music"
+          hx-target="#music-panel"
+          hx-swap="outerHTML"
+          hx-encoding="multipart/form-data">
+      <label class="btn-secondary" for="music-file-input">Attach music track</label>
+      <input id="music-file-input" type="file" name="music"
+             accept="audio/*"
+             style="display:none"
+             onchange="this.form.requestSubmit()" />
+      <span class="music-sub">Optional. Any mp3/wav/m4a. Claude will mix it per segment — ducked under voice, full under title cards.</span>
+    </form>
+  {{end}}
+</div>
+{{end}}

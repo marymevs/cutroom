@@ -5,13 +5,14 @@
 
   <div class="manifest-timeline">
     {{range .Manifest.Segments}}
+    {{$segOrder := .Order}}
     <div class="timeline-segment">
       <span class="seg-order">{{.Order}}</span>
       <span class="seg-clip">{{.ClipID}}</span>
       <span class="seg-range">{{printf "%.1f" .Start}}s – {{printf "%.1f" .End}}s</span>
     </div>
     {{range $.Manifest.TitleCards}}
-    {{if eq .AfterSegment $.Order}}
+    {{if eq .AfterSegment $segOrder}}
     <div class="timeline-card">
       <span class="card-icon">T</span>
       <span class="card-text">"{{.Text}}"</span>
@@ -32,6 +33,22 @@
   {{if .Manifest.OutputCuts}}
   <p class="cuts-summary">{{len .Manifest.OutputCuts}} cuts confirmed</p>
   {{end}}
+</section>
+
+<section class="step" id="step-render">
+  <div class="step-label">04 / Render</div>
+  <div class="step-body">
+    <p class="step-desc">FFmpeg executes the edit plan. You'll get a finished video, a vertical reel, and an SRT caption file.</p>
+    <button class="btn-primary render-btn"
+            hx-post="/projects/{{.ID}}/render"
+            hx-target="#render-status"
+            hx-swap="outerHTML"
+            hx-indicator="#render-spinner">
+      Render Video
+    </button>
+    <span id="render-spinner" class="htmx-indicator spinner">Rendering…</span>
+    <div id="render-status" data-polling="false"></div>
+  </div>
 </section>
 {{end}}
 {{end}}

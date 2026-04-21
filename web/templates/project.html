@@ -6,17 +6,20 @@
     <h2>{{.Name}}</h2>
     <span class="badge status-{{.Status}}">{{.Status}}</span>
   </div>
+  {{if and (eq .Status "error") .Error}}
+  <div class="error-detail status-error">
+    <strong>Last error:</strong>
+    <pre>{{.Error}}</pre>
+  </div>
+  {{end}}
 
   <!-- STEP 1: Upload Clips -->
   <section class="step" id="step-upload">
     <div class="step-label">01 / Upload Clips</div>
     <div class="step-body">
       <div class="upload-zone"
-           hx-post="/projects/{{.ID}}/upload"
-           hx-encoding="multipart/form-data"
-           hx-target="#clips-list"
-           hx-swap="innerHTML"
-           hx-trigger="drop"
+           data-project-id="{{.ID}}"
+           data-list-target="#clips-list"
            ondragover="this.classList.add('drag-over'); event.preventDefault()"
            ondragleave="this.classList.remove('drag-over')"
            ondrop="this.classList.remove('drag-over'); handleDrop(event, this)">
@@ -26,7 +29,7 @@
         <label class="btn-secondary" for="clip-file-input">Choose files</label>
         <input id="clip-file-input" type="file" accept="video/*" multiple
                style="display:none"
-               onchange="uploadFiles(this, '/projects/{{.ID}}/upload', '#clips-list')" />
+               onchange="uploadFiles(this, '{{.ID}}', '#clips-list')" />
       </div>
 
       <div id="clips-list">
@@ -55,7 +58,9 @@
   <!-- Analysis results (populated after analyze) -->
   <div id="analysis-results">
     {{if .Analysis}}
-    {{template "analysis_partial.html" .}}
+      {{template "analysis_partial.html" .}}
+    {{else if or (eq .Status "analyzing") (eq .Status "error")}}
+      {{template "analysis_status_partial.html" .}}
     {{end}}
   </div>
 
@@ -86,28 +91,6 @@
     {{template "manifest_partial.html" .}}
     {{end}}
   </div>
-
-  <!-- STEP 4: Render -->
-  {{if .Manifest}}
-  <section class="step" id="step-render">
-    <div class="step-label">04 / Render</div>
-    <div class="step-body">
-      <p class="step-desc">FFmpeg executes the edit plan. You'll get a finished video, a vertical reel, and an SRT caption file.</p>
-      <button class="btn-primary render-btn"
-              hx-post="/projects/{{.ID}}/render"
-              hx-target="#render-status"
-              hx-indicator="#render-spinner">
-        Render Video
-      </button>
-      <span id="render-spinner" class="htmx-indicator spinner">Rendering…</span>
-      <div id="render-status"
-           hx-get="/projects/{{.ID}}/status"
-           hx-trigger="every 3s [document.querySelector('.render-btn') && document.querySelector('#render-status').dataset.polling === 'true']"
-           hx-swap="outerHTML">
-      </div>
-    </div>
-  </section>
-  {{end}}
 
   <!-- Downloads (shown when done) -->
   {{if eq .Status "done"}}

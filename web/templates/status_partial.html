@@ -6,9 +6,16 @@
      hx-swap="outerHTML">
   <span class="status-msg status-{{.Status}}">
     {{if eq .Status "rendering"}}Rendering in progress…{{end}}
-    {{if eq .Status "done"}}Done! Refresh to download.{{end}}
     {{if eq .Status "error"}}Error: {{.Error}}{{end}}
-    {{if eq .Status "analyzing"}}Analyzing…{{end}}
+    {{if eq .Status "done"}}Done ✓{{end}}
   </span>
+
+  {{if eq .Status "done"}}
+  <div class="downloads">
+    {{if .OutputURL}}<a href="/projects/{{.ID}}/download?type=video" class="download-btn" download>Download Final Video</a>{{end}}
+    {{if .ReelsURL}}<a href="/projects/{{.ID}}/download?type=reel" class="download-btn reel" download>Download Reel (9:16)</a>{{end}}
+    {{if .CaptionURL}}<a href="/projects/{{.ID}}/download?type=captions" class="download-btn captions" download>Download Captions (.srt)</a>{{end}}
+  </div>
+  {{end}}
 </div>
 {{end}}

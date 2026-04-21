@@ -88,3 +88,20 @@ func (c *Client) signedURL(objectName string) (string, error) {
 	}
 	return c.client.Bucket(c.bucket).SignedURL(objectName, opts)
 }
+
+// SignedUploadURL returns a signed URL the browser can PUT the file to directly,
+// bypassing Cloud Run's request body limit. contentType must match the header
+// the browser will send, or GCS rejects the PUT.
+func (c *Client) SignedUploadURL(objectName, contentType string) (string, error) {
+	opts := &storage.SignedURLOptions{
+		Method:      "PUT",
+		ContentType: contentType,
+		Expires:     time.Now().Add(1 * time.Hour),
+	}
+	return c.client.Bucket(c.bucket).SignedURL(objectName, opts)
+}
+
+// ReadSignedURL returns a time-limited GET URL for an already-uploaded object.
+func (c *Client) ReadSignedURL(objectName string) (string, error) {
+	return c.signedURL(objectName)
+}

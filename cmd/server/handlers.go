@@ -3,34 +3,57 @@ package main
 import (
 	"encoding/json"
 	"html/template"
+	"log"
 	"net/http"
 	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/mary/cutroom/internal/domain"
 	"github.com/mary/cutroom/internal/editor"
 	"github.com/mary/cutroom/internal/gcs"
 )
 
+func renderTemplate(w http.ResponseWriter, t *template.Template, name string, data any) {
+	if err := t.ExecuteTemplate(w, name, data); err != nil {
+		log.Printf("template %q execution error: %v", name, err)
+	}
+}
+
 type Handler struct {
 	pipeline *editor.Pipeline
 	gcs      *gcs.Client
-	projects map[string]*editor.Project // in-memory for now; swap for DB later
-	tmpl     *template.Template
+	projects map[string]*domain.Project // in-memory for now; swap for DB later
+	pages    map[string]*template.Template // page name -> layout+page set
+	partials *template.Template            // partials rendered standalone (HTMX)
 }
 
 func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client) *Handler {
-	tmpl := template.Must(template.ParseGlob("web/templates/*.html"))
+	partialFiles, err := filepath.Glob("web/templates/*_partial.html")
+	if err != nil {
+		panic(err)
+	}
+	pageNames := []string{"index.html", "project.html"}
+	pages := make(map[string]*template.Template, len(pageNames))
+	for _, p := range pageNames {
+		files := append([]string{
+			"web/templates/layout.html",
+			"web/templates/" + p,
+		}, partialFiles...)
+		pages[p] = template.Must(template.ParseFiles(files...))
+	}
+	partials := template.Must(template.ParseFiles(partialFiles...))
 	return &Handler{
 		pipeline: pipeline,
 		gcs:      gcsClient,
-		projects: make(map[string]*editor.Project),
-		tmpl:     tmpl,
+		projects: make(map[string]*domain.Project),
+		pages:    pages,
+		partials: partials,
 	}
 }
 
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
-	h.tmpl.ExecuteTemplate(w, "index.html", map[string]any{
+	renderTemplate(w, h.pages["index.html"], "layout.html", map[string]any{
 		"projects": h.projects,
 	})
 }
@@ -42,11 +65,11 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 		name = "Untitled Project"
 	}
 
-	p := &editor.Project{
+	p := &domain.Project{
 		ID:     uuid.New().String(),
 		Name:   name,
-		Status: editor.StatusCreated,
-		Clips:  []editor.Clip{},
+		Status: domain.StatusCreated,
+		Clips:  []domain.Clip{},
 	}
 	h.projects[p.ID] = p
 
@@ -60,11 +83,49 @@ func (h *Handler) GetProject(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	h.tmpl.ExecuteTemplate(w, "project.html", p)
+	renderTemplate(w, h.pages["project.html"], "layout.html", p)
 }
 
-// UploadClip receives a video file, streams it to GCS, registers it on the project.
-func (h *Handler) UploadClip(w http.ResponseWriter, r *http.Request) {
+// SignClipUpload returns a time-limited URL the browser PUTs the file to directly,
+// so video bytes never pass through Cloud Run (which caps request bodies at 32 MiB).
+// The browser follows up with RegisterClip once the PUT succeeds.
+func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, ok := h.projects[id]; !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	var req struct {
+		Filename    string `json:"filename"`
+		ContentType string `json:"contentType"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Filename == "" {
+		http.Error(w, "missing filename or contentType", http.StatusBadRequest)
+		return
+	}
+	if req.ContentType == "" {
+		req.ContentType = "application/octet-stream"
+	}
+
+	objectName := "projects/" + id + "/clips/" + uuid.New().String() + "-" + filepath.Base(req.Filename)
+	url, err := h.gcs.SignedUploadURL(objectName, req.ContentType)
+	if err != nil {
+		http.Error(w, "sign failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"uploadURL":   url,
+		"objectName":  objectName,
+		"contentType": req.ContentType,
+	})
+}
+
+// RegisterClip records a clip on the project after the browser has PUT the bytes
+// directly to GCS. It re-signs a read URL and appends to the clip list.
+func (h *Handler) RegisterClip(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	p, ok := h.projects[id]
 	if !ok {
@@ -72,33 +133,35 @@ func (h *Handler) UploadClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.ParseMultipartForm(500 << 20) // 500 MB limit per clip
-	file, header, err := r.FormFile("clip")
-	if err != nil {
-		http.Error(w, "failed to read file: "+err.Error(), http.StatusBadRequest)
-		return
+	var req struct {
+		Filename   string `json:"filename"`
+		ObjectName string `json:"objectName"`
 	}
-	defer file.Close()
-
-	objectName := "projects/" + id + "/clips/" + header.Filename
-	gcsURL, err := h.gcs.Upload(r.Context(), objectName, file, header.Header.Get("Content-Type"))
-	if err != nil {
-		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ObjectName == "" {
+		http.Error(w, "missing objectName", http.StatusBadRequest)
 		return
 	}
 
-	clip := editor.Clip{
+	readURL, err := h.gcs.ReadSignedURL(req.ObjectName)
+	if err != nil {
+		http.Error(w, "sign read URL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	name := req.Filename
+	if name == "" {
+		name = filepath.Base(req.ObjectName)
+	}
+	p.Clips = append(p.Clips, domain.Clip{
 		ID:       uuid.New().String(),
-		Name:     header.Filename,
-		GCSPath:  objectName,
-		GCSURL:   gcsURL,
-		Duration: 0, // populated after analysis
-	}
-	p.Clips = append(p.Clips, clip)
-	p.Status = editor.StatusUploaded
+		Name:     name,
+		GCSPath:  req.ObjectName,
+		GCSURL:   readURL,
+		Duration: 0,
+	})
+	p.Status = domain.StatusUploaded
 
-	// Return updated clip list partial for HTMX
-	h.tmpl.ExecuteTemplate(w, "clips_partial.html", p)
+	renderTemplate(w, h.partials, "clips_partial.html", p)
 }
 
 // AnalyzeClips transcribes all clips and runs AI editorial analysis.
@@ -110,17 +173,30 @@ func (h *Handler) AnalyzeClips(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.Status = editor.StatusAnalyzing
+	p.Status = domain.StatusAnalyzing
+	p.Error = ""
 
 	go func() {
 		if err := h.pipeline.Analyze(p); err != nil {
-			p.Status = editor.StatusError
+			p.Status = domain.StatusError
 			p.Error = err.Error()
 		}
 	}()
 
-	w.Header().Set("HX-Trigger", "analysisStarted")
-	h.tmpl.ExecuteTemplate(w, "status_partial.html", p)
+	renderTemplate(w, h.partials, "analysis_status_partial.html", p)
+}
+
+// GetAnalysisStatus returns an HTML fragment reflecting the current analyze state.
+// HTMX polls this while status == "analyzing"; once the goroutine flips status
+// to "analyzed" or "error", this swaps the polling shell out for the final UI.
+func (h *Handler) GetAnalysisStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	p, ok := h.projects[id]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	renderTemplate(w, h.partials, "analysis_status_partial.html", p)
 }
 
 // SubmitInstructions parses free-text edit instructions into a manifest via Claude.
@@ -142,9 +218,9 @@ func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.Manifest = manifest
-	p.Status = editor.StatusManifestReady
+	p.Status = domain.StatusManifestReady
 
-	h.tmpl.ExecuteTemplate(w, "manifest_partial.html", p)
+	renderTemplate(w, h.partials, "manifest_partial.html", p)
 }
 
 // RenderVideo executes the edit manifest through FFmpeg.
@@ -156,18 +232,18 @@ func (h *Handler) RenderVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.Status = editor.StatusRendering
+	p.Status = domain.StatusRendering
 
 	go func() {
 		if err := h.pipeline.Render(p); err != nil {
-			p.Status = editor.StatusError
+			p.Status = domain.StatusError
 			p.Error = err.Error()
 			return
 		}
-		p.Status = editor.StatusDone
+		p.Status = domain.StatusDone
 	}()
 
-	h.tmpl.ExecuteTemplate(w, "status_partial.html", p)
+	renderTemplate(w, h.partials, "status_partial.html", p)
 }
 
 func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
@@ -177,14 +253,7 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":     string(p.Status),
-		"error":      p.Error,
-		"outputURL":  p.OutputURL,
-		"reelsURL":   p.ReelsURL,
-		"captionURL": p.CaptionURL,
-	})
+	renderTemplate(w, h.partials, "status_partial.html", p)
 }
 
 func (h *Handler) DownloadResult(w http.ResponseWriter, r *http.Request) {
