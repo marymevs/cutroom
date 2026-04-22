@@ -93,12 +93,16 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Poll for render status and refresh page when done
+// Reload the page once the render poll transitions from running → done.
+// Only true→false counts; the initial render-status element is polling=false,
+// as is the one embedded in the editable manifest partial, and neither should
+// trigger a reload.
+let wasRenderPolling = false;
 document.addEventListener('htmx:afterSwap', function (e) {
   const statusEl = document.getElementById('render-status');
-  if (!statusEl) return;
-  const status = statusEl.dataset.polling;
-  if (status === 'false') {
+  const isPolling = !!statusEl && statusEl.dataset.polling === 'true';
+  if (wasRenderPolling && !isPolling) {
     setTimeout(() => window.location.reload(), 1500);
   }
+  wasRenderPolling = isPolling;
 });

@@ -82,10 +82,11 @@ type EditManifest struct {
 
 // Segment is a contiguous chunk of a source clip to include.
 type Segment struct {
-	ClipID string
-	Start  float64
-	End    float64
-	Order  int
+	ClipID      string
+	Start       float64
+	End         float64
+	Order       int
+	Description string // plain-English summary shown in the edit-plan UI
 }
 
 // TitleCard is a text overlay to insert between segments.
@@ -98,9 +99,10 @@ type TitleCard struct {
 
 // Cut is a confirmed removal from a clip.
 type Cut struct {
-	ClipID string
-	Start  float64
-	End    float64
+	ClipID      string
+	Start       float64
+	End         float64
+	Description string // why this section was cut (filler, pacing, etc.)
 }
 
 // ReelSegment defines what to export as a vertical short.

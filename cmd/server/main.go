@@ -54,6 +54,7 @@ func main() {
 	r.Post("/projects/{id}/clips/register", h.RegisterClip)
 	r.Post("/projects/{id}/analyze", h.AnalyzeClips)
 	r.Post("/projects/{id}/instruct", h.SubmitInstructions)
+	r.Post("/projects/{id}/manifest", h.UpdateManifest)
 	r.Post("/projects/{id}/render", h.RenderVideo)
 	r.Get("/projects/{id}/status", h.GetStatus)
 	r.Get("/projects/{id}/analysis-status", h.GetAnalysisStatus)
