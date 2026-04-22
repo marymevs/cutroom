@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/mary/cutroom/internal/ai"
 	"github.com/mary/cutroom/internal/editor"
 	"github.com/mary/cutroom/internal/gcs"
+	"github.com/mary/cutroom/internal/store"
 	"github.com/mary/cutroom/internal/transcribe"
 )
 
@@ -33,7 +35,13 @@ func main() {
 	aiClient := ai.NewAnthropicClient(os.Getenv("ANTHROPIC_API_KEY"))
 	editPipeline := editor.NewPipeline(gcsClient, transcriber, aiClient)
 
-	h := NewHandler(editPipeline, gcsClient)
+	projectStore, err := store.NewProjectStore(context.Background(), os.Getenv("FIRESTORE_PROJECT_ID"))
+	if err != nil {
+		log.Fatalf("failed to init project store: %v", err)
+	}
+	defer projectStore.Close()
+
+	h := NewHandler(editPipeline, gcsClient, projectStore)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

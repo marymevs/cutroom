@@ -32,6 +32,30 @@ func NewPipeline(g *gcs.Client, t *transcribe.WhisperClient, a *ai.AnthropicClie
 	return &Pipeline{gcs: g, transcriber: t, ai: a, workDir: workDir}
 }
 
+// localClipPath returns the on-disk location for a clip, under the pipeline's
+// workDir. Render and Analyze both compute this the same way.
+func (p *Pipeline) localClipPath(projID string, clip *domain.Clip) string {
+	return filepath.Join(p.workDir, projID, clip.ID+filepath.Ext(clip.Name))
+}
+
+// ensureClipsLocal downloads every clip that isn't already on disk.
+func (p *Pipeline) ensureClipsLocal(ctx context.Context, proj *domain.Project) error {
+	for i := range proj.Clips {
+		clip := &proj.Clips[i]
+		local := p.localClipPath(proj.ID, clip)
+		if _, err := os.Stat(local); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
+			return err
+		}
+		if err := p.gcs.Download(ctx, clip.GCSPath, local); err != nil {
+			return fmt.Errorf("download clip %s: %w", clip.Name, err)
+		}
+	}
+	return nil
+}
+
 // Analyze downloads clips, probes duration, transcribes, and runs AI editorial review.
 func (p *Pipeline) Analyze(proj *domain.Project) error {
 	ctx := context.Background()
@@ -41,7 +65,7 @@ func (p *Pipeline) Analyze(proj *domain.Project) error {
 		clip := &proj.Clips[i]
 
 		// Download clip from GCS to local workdir
-		localPath := filepath.Join(p.workDir, proj.ID, clip.ID+filepath.Ext(clip.Name))
+		localPath := p.localClipPath(proj.ID, clip)
 		os.MkdirAll(filepath.Dir(localPath), 0755)
 
 		if err := p.gcs.Download(ctx, clip.GCSPath, localPath); err != nil {
@@ -91,6 +115,12 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 	m := proj.Manifest
 	if m == nil {
 		return fmt.Errorf("no manifest")
+	}
+
+	// Cloud Run's /tmp is ephemeral and a render request can land on a fresh
+	// instance that never ran Analyze. Re-download any clip that isn't on disk.
+	if err := p.ensureClipsLocal(ctx, proj); err != nil {
+		return fmt.Errorf("rehydrate clips: %w", err)
 	}
 
 	outDir := filepath.Join(p.workDir, proj.ID, "out")
@@ -221,11 +251,15 @@ func buildFFmpegCommand(proj *domain.Project, m *domain.EditManifest, outPath st
 
 	args = append(args,
 		"-filter_complex", strings.Join(filterParts, ";"),
+		"-filter_threads", "0",
+		"-filter_complex_threads", "0",
 		"-map", "[outv]",
 		"-map", "[outa]",
 		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "23",
 		"-c:a", "aac",
-		"-crf", "18",
+		"-threads", "0",
 		outPath,
 	)
 
@@ -251,7 +285,10 @@ func cutReel(proj *domain.Project, rs *domain.ReelSegment, outPath string) error
 		"-i", clipPath,
 		"-vf", "crop=ih*9/16:ih,scale=1080:1920",
 		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "23",
 		"-c:a", "aac",
+		"-threads", "0",
 		outPath,
 	)
 	cmd.Stdout = os.Stdout

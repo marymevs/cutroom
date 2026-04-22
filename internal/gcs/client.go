@@ -2,6 +2,8 @@ package gcs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -63,7 +65,11 @@ func (c *Client) UploadFile(ctx context.Context, objectName, localPath, contentT
 	return c.Upload(ctx, objectName, f, contentType)
 }
 
-// Download fetches a GCS object and writes it to localPath.
+// Download fetches a GCS object and writes it to localPath atomically:
+// bytes stream into a unique per-call tmp file and the file is renamed into
+// place only on a clean finish. Using a unique tmp name (rather than
+// localPath+".part") keeps two concurrent Download calls for the same
+// destination from truncating each other's in-flight writes.
 func (c *Client) Download(ctx context.Context, objectName, localPath string) error {
 	rc, err := c.client.Bucket(c.bucket).Object(objectName).NewReader(ctx)
 	if err != nil {
@@ -71,14 +77,37 @@ func (c *Client) Download(ctx context.Context, objectName, localPath string) err
 	}
 	defer rc.Close()
 
-	f, err := os.Create(localPath)
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("tmp nonce: %w", err)
+	}
+	tmpPath := fmt.Sprintf("%s.part.%s", localPath, hex.EncodeToString(nonce[:]))
+
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create local file: %w", err)
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, rc)
-	return err
+	if _, err := io.Copy(f, rc); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		// A racing Download may have already populated localPath; if the
+		// destination exists, our work is redundant but not a failure.
+		if _, statErr := os.Stat(localPath); statErr == nil {
+			os.Remove(tmpPath)
+			return nil
+		}
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func (c *Client) signedURL(objectName string) (string, error) {
