@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,6 +18,21 @@ import (
 	"github.com/mary/cutroom/internal/gcs"
 	"github.com/mary/cutroom/internal/store"
 )
+
+// templateFuncs are helpers exposed to every template set.
+var templateFuncs = template.FuncMap{
+	// clipName resolves a clip UUID to its uploaded filename for display.
+	// Falls back to the ID itself if the clip is missing (stale manifest ref).
+	"clipName": func(clips []domain.Clip, id string) string {
+		for _, c := range clips {
+			if c.ID == id {
+				return c.Name
+			}
+		}
+		return id
+	},
+	"add1": func(i int) int { return i + 1 },
+}
 
 func renderTemplate(w http.ResponseWriter, t *template.Template, name string, data any) {
 	if err := t.ExecuteTemplate(w, name, data); err != nil {
@@ -46,9 +62,9 @@ func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *
 			"web/templates/layout.html",
 			"web/templates/" + p,
 		}, partialFiles...)
-		pages[p] = template.Must(template.ParseFiles(files...))
+		pages[p] = template.Must(template.New(p).Funcs(templateFuncs).ParseFiles(files...))
 	}
-	partials := template.Must(template.ParseFiles(partialFiles...))
+	partials := template.Must(template.New("partials").Funcs(templateFuncs).ParseFiles(partialFiles...))
 	return &Handler{
 		pipeline: pipeline,
 		gcs:      gcsClient,
@@ -183,7 +199,7 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	objectName := "projects/" + p.ID + "/clips/" + uuid.New().String() + "-" + filepath.Base(req.Filename)
-	url, err := h.gcs.SignedUploadURL(objectName, req.ContentType)
+	url, err := h.gcs.SignedResumableInitURL(objectName, req.ContentType)
 	if err != nil {
 		http.Error(w, "sign failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -191,7 +207,7 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"uploadURL":   url,
+		"initURL":     url,
 		"objectName":  objectName,
 		"contentType": req.ContentType,
 	})
@@ -309,6 +325,103 @@ func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderTemplate(w, h.partials, "manifest_partial.html", p)
+}
+
+// UpdateManifest replaces the project's edit plan with user-edited values
+// submitted from the plan-review form. The form uses parallel-array fields
+// (seg_start[], seg_end[], seg_description[], …) so each row can be deleted
+// client-side by removing its DOM element before submit.
+func (h *Handler) UpdateManifest(w http.ResponseWriter, r *http.Request) {
+	p := h.loadOr404(w, r)
+	if p == nil {
+		return
+	}
+	if p.Manifest == nil {
+		http.Error(w, "no manifest to update", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	manifest := &domain.EditManifest{
+		CaptionFile: p.Manifest.CaptionFile,
+	}
+
+	segClipIDs := r.Form["seg_clip_id"]
+	segStarts := r.Form["seg_start"]
+	segEnds := r.Form["seg_end"]
+	segDescs := r.Form["seg_description"]
+	for i, clipID := range segClipIDs {
+		manifest.Segments = append(manifest.Segments, domain.Segment{
+			ClipID:      clipID,
+			Start:       parseFloatAt(segStarts, i),
+			End:         parseFloatAt(segEnds, i),
+			Order:       i + 1,
+			Description: getAt(segDescs, i),
+		})
+	}
+
+	tcAfter := r.Form["tc_after_segment"]
+	tcText := r.Form["tc_text"]
+	tcDur := r.Form["tc_duration"]
+	tcStyle := r.Form["tc_style"]
+	for i := range tcText {
+		manifest.TitleCards = append(manifest.TitleCards, domain.TitleCard{
+			AfterSegment: parseIntAt(tcAfter, i),
+			Text:         tcText[i],
+			Duration:     parseFloatAt(tcDur, i),
+			Style:        getAt(tcStyle, i),
+		})
+	}
+
+	cutClipIDs := r.Form["cut_clip_id"]
+	cutStarts := r.Form["cut_start"]
+	cutEnds := r.Form["cut_end"]
+	cutDescs := r.Form["cut_description"]
+	for i, clipID := range cutClipIDs {
+		manifest.OutputCuts = append(manifest.OutputCuts, domain.Cut{
+			ClipID:      clipID,
+			Start:       parseFloatAt(cutStarts, i),
+			End:         parseFloatAt(cutEnds, i),
+			Description: getAt(cutDescs, i),
+		})
+	}
+
+	if reelClip := r.FormValue("reel_clip_id"); reelClip != "" {
+		manifest.ReelSegment = &domain.ReelSegment{
+			ClipID: reelClip,
+			Start:  parseFloatAt(r.Form["reel_start"], 0),
+			End:    parseFloatAt(r.Form["reel_end"], 0),
+		}
+	}
+
+	p.Manifest = manifest
+	p.Status = domain.StatusManifestReady
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	renderTemplate(w, h.partials, "manifest_partial.html", p)
+}
+
+func getAt(s []string, i int) string {
+	if i < 0 || i >= len(s) {
+		return ""
+	}
+	return s[i]
+}
+
+func parseFloatAt(s []string, i int) float64 {
+	f, _ := strconv.ParseFloat(getAt(s, i), 64)
+	return f
+}
+
+func parseIntAt(s []string, i int) int {
+	n, _ := strconv.Atoi(getAt(s, i))
+	return n
 }
 
 // RenderVideo executes the edit manifest through FFmpeg.

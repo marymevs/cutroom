@@ -2,7 +2,14 @@
   {
     "origin": ["*"],
     "method": ["GET", "POST", "PUT"],
-    "responseHeader": ["Content-Type", "ETag"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Range",
+      "Location",
+      "Range",
+      "ETag",
+      "x-goog-resumable"
+    ],
     "maxAgeSeconds": 3600
   }
 ]

@@ -118,14 +118,21 @@ func (c *Client) signedURL(objectName string) (string, error) {
 	return c.client.Bucket(c.bucket).SignedURL(objectName, opts)
 }
 
-// SignedUploadURL returns a signed URL the browser can PUT the file to directly,
-// bypassing Cloud Run's request body limit. contentType must match the header
-// the browser will send, or GCS rejects the PUT.
-func (c *Client) SignedUploadURL(objectName, contentType string) (string, error) {
+// SignedResumableInitURL returns a signed URL the browser POSTs to in order to
+// start a GCS resumable upload session. The POST must include the header
+// `x-goog-resumable: start` and a Content-Type matching contentType; GCS
+// responds with 201 and a `Location` header containing a session URL that is
+// valid for 7 days and accepts chunked PUTs with `Content-Range`.
+//
+// Resumable uploads (not single-shot PUTs) are what make big mobile uploads
+// survive flaky networks: each chunk can be retried and the session can be
+// resumed from wherever GCS acknowledged bytes.
+func (c *Client) SignedResumableInitURL(objectName, contentType string) (string, error) {
 	opts := &storage.SignedURLOptions{
-		Method:      "PUT",
+		Method:      "POST",
 		ContentType: contentType,
-		Expires:     time.Now().Add(1 * time.Hour),
+		Headers:     []string{"x-goog-resumable:start"},
+		Expires:     time.Now().Add(6 * time.Hour),
 	}
 	return c.client.Bucket(c.bucket).SignedURL(objectName, opts)
 }

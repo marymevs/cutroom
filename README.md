@@ -56,12 +56,16 @@ PORT=8080
 gsutil cors set cors.json gs://your-bucket-name
 ```
 
-`cors.json`:
+`cors.json` (the `Location` / `x-goog-resumable` headers must be exposed so
+the browser can read the resumable-session URL on upload init):
 ```json
 [{
   "origin": ["*"],
   "method": ["GET", "POST", "PUT"],
-  "responseHeader": ["Content-Type"],
+  "responseHeader": [
+    "Content-Type", "Content-Range", "Location",
+    "Range", "ETag", "x-goog-resumable"
+  ],
   "maxAgeSeconds": 3600
 }]
 ```

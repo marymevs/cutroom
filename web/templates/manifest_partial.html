@@ -1,44 +1,137 @@
 {{define "manifest_partial.html"}}
 {{if .Manifest}}
-<section class="manifest-panel">
-  <div class="step-label">Edit Plan Ready</div>
+<section class="manifest-panel" id="manifest-panel">
+  <div class="step-label">Edit Plan — Review &amp; Edit</div>
+  <p class="step-desc">Every edit below gets applied when you render. Tweak timestamps, rewrite descriptions, or remove anything that doesn't belong. Changes only take effect after <em>Save Plan</em>.</p>
 
-  <div class="manifest-timeline">
-    {{range .Manifest.Segments}}
-    {{$segOrder := .Order}}
-    <div class="timeline-segment">
-      <span class="seg-order">{{.Order}}</span>
-      <span class="seg-clip">{{.ClipID}}</span>
-      <span class="seg-range">{{printf "%.1f" .Start}}s – {{printf "%.1f" .End}}s</span>
+  <form id="manifest-form"
+        hx-post="/projects/{{.ID}}/manifest"
+        hx-target="#manifest-results"
+        hx-swap="innerHTML"
+        hx-indicator="#save-spinner"
+        onsubmit="renumberSegments(this)">
+
+    <div class="plan-section">
+      <h3 class="plan-section-title">Segments <span class="plan-hint">— kept video, in playback order</span></h3>
+      {{if .Manifest.Segments}}
+      <div class="plan-rows" data-kind="segments">
+        {{range $i, $s := .Manifest.Segments}}
+        <div class="plan-row plan-row--segment">
+          <span class="row-order">{{add1 $i}}</span>
+          <div class="row-main">
+            <div class="row-meta">
+              <span class="clip-tag" title="source clip">{{clipName $.Clips $s.ClipID}}</span>
+              <span class="time-range">
+                <input type="number" step="0.1" min="0" name="seg_start" value="{{printf "%.1f" $s.Start}}" class="time-input" aria-label="Segment start (seconds)">
+                <span class="range-sep">→</span>
+                <input type="number" step="0.1" min="0" name="seg_end" value="{{printf "%.1f" $s.End}}" class="time-input" aria-label="Segment end (seconds)">
+                <span class="time-unit">s</span>
+              </span>
+            </div>
+            <input type="text" name="seg_description" value="{{$s.Description}}"
+                   placeholder="What happens here? (e.g. intro handshake, explaining the recipe)"
+                   class="desc-input">
+            <input type="hidden" name="seg_clip_id" value="{{$s.ClipID}}">
+          </div>
+          <button type="button" class="row-del" onclick="removeRow(this)" aria-label="Delete segment">×</button>
+        </div>
+        {{end}}
+      </div>
+      {{else}}
+      <p class="plan-empty">No segments — the rendered video will be empty.</p>
+      {{end}}
     </div>
-    {{range $.Manifest.TitleCards}}
-    {{if eq .AfterSegment $segOrder}}
-    <div class="timeline-card">
-      <span class="card-icon">T</span>
-      <span class="card-text">"{{.Text}}"</span>
-      <span class="card-dur">{{printf "%.0f" .Duration}}s</span>
+
+    {{if .Manifest.TitleCards}}
+    <div class="plan-section">
+      <h3 class="plan-section-title">Title cards <span class="plan-hint">— text overlays between segments</span></h3>
+      <div class="plan-rows" data-kind="title_cards">
+        {{range .Manifest.TitleCards}}
+        <div class="plan-row plan-row--card">
+          <span class="row-order">T</span>
+          <div class="row-main">
+            <div class="row-meta">
+              <span class="clip-tag" title="inserted after segment">after #<input type="number" min="0" name="tc_after_segment" value="{{.AfterSegment}}" class="idx-input" aria-label="After segment index"></span>
+              <span class="time-range">
+                <input type="number" step="0.5" min="0.5" name="tc_duration" value="{{printf "%.1f" .Duration}}" class="time-input" aria-label="Duration (seconds)">
+                <span class="time-unit">s</span>
+              </span>
+            </div>
+            <input type="text" name="tc_text" value="{{.Text}}" placeholder="Title card text" class="desc-input">
+            <input type="hidden" name="tc_style" value="{{.Style}}">
+          </div>
+          <button type="button" class="row-del" onclick="removeRow(this)" aria-label="Delete title card">×</button>
+        </div>
+        {{end}}
+      </div>
     </div>
     {{end}}
-    {{end}}
-    {{end}}
-  </div>
 
-  {{if .Manifest.ReelSegment}}
-  <div class="reel-preview">
-    <span class="reel-label">Reel</span>
-    <span>{{printf "%.1f" .Manifest.ReelSegment.Start}}s → {{printf "%.1f" .Manifest.ReelSegment.End}}s</span>
-  </div>
-  {{end}}
+    {{if .Manifest.OutputCuts}}
+    <div class="plan-section">
+      <h3 class="plan-section-title">Cuts <span class="plan-hint">— sections removed from the source</span></h3>
+      <div class="plan-rows" data-kind="cuts">
+        {{range .Manifest.OutputCuts}}
+        <div class="plan-row plan-row--cut">
+          <span class="row-order">✂</span>
+          <div class="row-main">
+            <div class="row-meta">
+              <span class="clip-tag">{{clipName $.Clips .ClipID}}</span>
+              <span class="time-range">
+                <input type="number" step="0.1" min="0" name="cut_start" value="{{printf "%.1f" .Start}}" class="time-input" aria-label="Cut start (seconds)">
+                <span class="range-sep">→</span>
+                <input type="number" step="0.1" min="0" name="cut_end" value="{{printf "%.1f" .End}}" class="time-input" aria-label="Cut end (seconds)">
+                <span class="time-unit">s</span>
+              </span>
+            </div>
+            <input type="text" name="cut_description" value="{{.Description}}" placeholder="Why cut? (e.g. filler words, repeated line)" class="desc-input">
+            <input type="hidden" name="cut_clip_id" value="{{.ClipID}}">
+          </div>
+          <button type="button" class="row-del" onclick="removeRow(this)" aria-label="Delete cut">×</button>
+        </div>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
 
-  {{if .Manifest.OutputCuts}}
-  <p class="cuts-summary">{{len .Manifest.OutputCuts}} cuts confirmed</p>
-  {{end}}
+    <div class="plan-section">
+      <h3 class="plan-section-title">Reel <span class="plan-hint">— vertical short exported alongside the full video</span></h3>
+      {{if .Manifest.ReelSegment}}
+      <div class="plan-rows" data-kind="reel">
+        <div class="plan-row plan-row--reel">
+          <span class="row-order">R</span>
+          <div class="row-main">
+            <div class="row-meta">
+              <span class="clip-tag">{{clipName $.Clips .Manifest.ReelSegment.ClipID}}</span>
+              <span class="time-range">
+                <input type="number" step="0.1" min="0" name="reel_start" value="{{printf "%.1f" .Manifest.ReelSegment.Start}}" class="time-input" aria-label="Reel start (seconds)">
+                <span class="range-sep">→</span>
+                <input type="number" step="0.1" min="0" name="reel_end" value="{{printf "%.1f" .Manifest.ReelSegment.End}}" class="time-input" aria-label="Reel end (seconds)">
+                <span class="time-unit">s</span>
+              </span>
+            </div>
+            <input type="hidden" name="reel_clip_id" value="{{.Manifest.ReelSegment.ClipID}}">
+          </div>
+          <button type="button" class="row-del" onclick="removeRow(this)" aria-label="Remove reel">×</button>
+        </div>
+      </div>
+      {{else}}
+      <p class="plan-empty">No reel selected — only the full video will render.</p>
+      {{end}}
+    </div>
+
+    <div class="plan-actions">
+      <button type="submit" class="btn-secondary">Save Plan</button>
+      <span id="save-spinner" class="htmx-indicator spinner">Saving…</span>
+      <span class="plan-actions-hint">Save before rendering so your edits apply.</span>
+    </div>
+  </form>
 </section>
 
 <section class="step" id="step-render">
   <div class="step-label">04 / Render</div>
   <div class="step-body">
-    <p class="step-desc">FFmpeg executes the edit plan. You'll get a finished video, a vertical reel, and an SRT caption file.</p>
+    <p class="step-desc">FFmpeg executes the saved edit plan. You'll get a finished video, a vertical reel, and an SRT caption file.</p>
     <button class="btn-primary render-btn"
             hx-post="/projects/{{.ID}}/render"
             hx-target="#render-status"
@@ -50,5 +143,19 @@
     <div id="render-status" data-polling="false"></div>
   </div>
 </section>
+
+<script>
+  function removeRow(btn) {
+    const row = btn.closest('.plan-row');
+    if (row) row.remove();
+  }
+  // Segments must carry no gaps in their order numbers — the form omits the
+  // Order field entirely and the server reassigns 1..N by submission order.
+  // This no-op hook exists so the UI can later renumber on delete if needed.
+  function renumberSegments(form) {
+    const rows = form.querySelectorAll('.plan-row--segment .row-order');
+    rows.forEach((el, i) => { el.textContent = String(i + 1); });
+  }
+</script>
 {{end}}
 {{end}}

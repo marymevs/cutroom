@@ -183,13 +183,13 @@ func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Projec
 Respond ONLY with valid JSON. No preamble, no markdown. Schema:
 {
   "segments": [
-    { "clip_id": "string", "start": 0.0, "end": 0.0, "order": 0 }
+    { "clip_id": "string", "start": 0.0, "end": 0.0, "order": 0, "description": "string" }
   ],
   "title_cards": [
     { "after_segment": 0, "text": "string", "duration": 3.0, "style": "default" }
   ],
   "output_cuts": [
-    { "clip_id": "string", "start": 0.0, "end": 0.0 }
+    { "clip_id": "string", "start": 0.0, "end": 0.0, "description": "string" }
   ],
   "reel_segment": { "clip_id": "string", "start": 0.0, "end": 0.0 }
 }
@@ -199,7 +199,8 @@ Rules:
 - title_cards are inserted BETWEEN segments using after_segment index
 - output_cuts are confirmed removals (can include suggested cuts from analysis)
 - reel_segment is the best 30-60s moment for a Short/Reel
-- style options: "default" (white text, black bg), "minimal" (small caps), "bold" (large centered)`
+- style options: "default" (white text, black bg), "minimal" (small caps), "bold" (large centered)
+- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`
 
 	user := fmt.Sprintf(`Clips:
 %s
@@ -221,10 +222,11 @@ Editor instructions:
 
 	var result struct {
 		Segments []struct {
-			ClipID string  `json:"clip_id"`
-			Start  float64 `json:"start"`
-			End    float64 `json:"end"`
-			Order  int     `json:"order"`
+			ClipID      string  `json:"clip_id"`
+			Start       float64 `json:"start"`
+			End         float64 `json:"end"`
+			Order       int     `json:"order"`
+			Description string  `json:"description"`
 		} `json:"segments"`
 		TitleCards []struct {
 			AfterSegment int     `json:"after_segment"`
@@ -233,9 +235,10 @@ Editor instructions:
 			Style        string  `json:"style"`
 		} `json:"title_cards"`
 		OutputCuts []struct {
-			ClipID string  `json:"clip_id"`
-			Start  float64 `json:"start"`
-			End    float64 `json:"end"`
+			ClipID      string  `json:"clip_id"`
+			Start       float64 `json:"start"`
+			End         float64 `json:"end"`
+			Description string  `json:"description"`
 		} `json:"output_cuts"`
 		ReelSegment *struct {
 			ClipID string  `json:"clip_id"`
@@ -252,10 +255,11 @@ Editor instructions:
 
 	for _, s := range result.Segments {
 		manifest.Segments = append(manifest.Segments, domain.Segment{
-			ClipID: s.ClipID,
-			Start:  s.Start,
-			End:    s.End,
-			Order:  s.Order,
+			ClipID:      s.ClipID,
+			Start:       s.Start,
+			End:         s.End,
+			Order:       s.Order,
+			Description: s.Description,
 		})
 	}
 	for _, tc := range result.TitleCards {
@@ -268,9 +272,10 @@ Editor instructions:
 	}
 	for _, oc := range result.OutputCuts {
 		manifest.OutputCuts = append(manifest.OutputCuts, domain.Cut{
-			ClipID: oc.ClipID,
-			Start:  oc.Start,
-			End:    oc.End,
+			ClipID:      oc.ClipID,
+			Start:       oc.Start,
+			End:         oc.End,
+			Description: oc.Description,
 		})
 	}
 	if result.ReelSegment != nil {
