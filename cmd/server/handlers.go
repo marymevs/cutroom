@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/mary/cutroom/internal/domain"
 	"github.com/mary/cutroom/internal/editor"
 	"github.com/mary/cutroom/internal/gcs"
+	"github.com/mary/cutroom/internal/store"
 )
 
 func renderTemplate(w http.ResponseWriter, t *template.Template, name string, data any) {
@@ -23,12 +27,14 @@ func renderTemplate(w http.ResponseWriter, t *template.Template, name string, da
 type Handler struct {
 	pipeline *editor.Pipeline
 	gcs      *gcs.Client
-	projects map[string]*domain.Project // in-memory for now; swap for DB later
+	store    *store.ProjectStore
+	mu       sync.RWMutex
+	projects map[string]*domain.Project   // in-memory cache of Firestore docs
 	pages    map[string]*template.Template // page name -> layout+page set
 	partials *template.Template            // partials rendered standalone (HTMX)
 }
 
-func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client) *Handler {
+func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *store.ProjectStore) *Handler {
 	partialFiles, err := filepath.Glob("web/templates/*_partial.html")
 	if err != nil {
 		panic(err)
@@ -46,15 +52,81 @@ func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client) *Handler {
 	return &Handler{
 		pipeline: pipeline,
 		gcs:      gcsClient,
+		store:    projectStore,
 		projects: make(map[string]*domain.Project),
 		pages:    pages,
 		partials: partials,
 	}
 }
 
+// lookup returns the project from the in-memory cache, falling back to
+// Firestore and warming the cache on a hit. Returns (nil, nil) if the
+// project does not exist anywhere.
+func (h *Handler) lookup(ctx context.Context, id string) (*domain.Project, error) {
+	h.mu.RLock()
+	p, ok := h.projects[id]
+	h.mu.RUnlock()
+	if ok {
+		return p, nil
+	}
+
+	p, err := h.store.Get(ctx, id)
+	if err != nil || p == nil {
+		return p, err
+	}
+
+	h.mu.Lock()
+	if existing, ok := h.projects[id]; ok {
+		// Another request beat us to the cache; prefer the existing pointer
+		// so goroutines writing to it keep targeting the live object.
+		p = existing
+	} else {
+		h.projects[id] = p
+	}
+	h.mu.Unlock()
+	return p, nil
+}
+
+func (h *Handler) cache(p *domain.Project) {
+	h.mu.Lock()
+	h.projects[p.ID] = p
+	h.mu.Unlock()
+}
+
+// persistAsync saves a project without blocking the caller. Used after
+// background goroutines (Analyze, Render) finish mutating the project.
+func (h *Handler) persistAsync(p *domain.Project) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := h.store.Save(ctx, p); err != nil {
+		log.Printf("persist project %s: %v", p.ID, err)
+	}
+}
+
+// loadOr404 is a common prologue: look up the project, 404 on miss,
+// 500 on store error.
+func (h *Handler) loadOr404(w http.ResponseWriter, r *http.Request) *domain.Project {
+	id := chi.URLParam(r, "id")
+	p, err := h.lookup(r.Context(), id)
+	if err != nil {
+		http.Error(w, "load project: "+err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	if p == nil {
+		http.NotFound(w, r)
+		return nil
+	}
+	return p
+}
+
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
+	projects, err := h.store.List(r.Context())
+	if err != nil {
+		http.Error(w, "list projects: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	renderTemplate(w, h.pages["index.html"], "layout.html", map[string]any{
-		"projects": h.projects,
+		"projects": projects,
 	})
 }
 
@@ -71,16 +143,19 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 		Status: domain.StatusCreated,
 		Clips:  []domain.Clip{},
 	}
-	h.projects[p.ID] = p
+
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "create project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.cache(p)
 
 	http.Redirect(w, r, "/projects/"+p.ID, http.StatusSeeOther)
 }
 
 func (h *Handler) GetProject(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 	renderTemplate(w, h.pages["project.html"], "layout.html", p)
@@ -90,9 +165,8 @@ func (h *Handler) GetProject(w http.ResponseWriter, r *http.Request) {
 // so video bytes never pass through Cloud Run (which caps request bodies at 32 MiB).
 // The browser follows up with RegisterClip once the PUT succeeds.
 func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if _, ok := h.projects[id]; !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 
@@ -108,7 +182,7 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 		req.ContentType = "application/octet-stream"
 	}
 
-	objectName := "projects/" + id + "/clips/" + uuid.New().String() + "-" + filepath.Base(req.Filename)
+	objectName := "projects/" + p.ID + "/clips/" + uuid.New().String() + "-" + filepath.Base(req.Filename)
 	url, err := h.gcs.SignedUploadURL(objectName, req.ContentType)
 	if err != nil {
 		http.Error(w, "sign failed: "+err.Error(), http.StatusInternalServerError)
@@ -126,10 +200,8 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 // RegisterClip records a clip on the project after the browser has PUT the bytes
 // directly to GCS. It re-signs a read URL and appends to the clip list.
 func (h *Handler) RegisterClip(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 
@@ -161,26 +233,41 @@ func (h *Handler) RegisterClip(w http.ResponseWriter, r *http.Request) {
 	})
 	p.Status = domain.StatusUploaded
 
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	renderTemplate(w, h.partials, "clips_partial.html", p)
 }
 
 // AnalyzeClips transcribes all clips and runs AI editorial analysis.
 func (h *Handler) AnalyzeClips(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
+		return
+	}
+
+	// Guard against duplicate submits (double-click, HTMX retry) spawning
+	// concurrent analyze goroutines that would race on the same local files.
+	if p.Status == domain.StatusAnalyzing {
+		renderTemplate(w, h.partials, "analysis_status_partial.html", p)
 		return
 	}
 
 	p.Status = domain.StatusAnalyzing
 	p.Error = ""
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	go func() {
 		if err := h.pipeline.Analyze(p); err != nil {
 			p.Status = domain.StatusError
 			p.Error = err.Error()
 		}
+		h.persistAsync(p)
 	}()
 
 	renderTemplate(w, h.partials, "analysis_status_partial.html", p)
@@ -190,10 +277,8 @@ func (h *Handler) AnalyzeClips(w http.ResponseWriter, r *http.Request) {
 // HTMX polls this while status == "analyzing"; once the goroutine flips status
 // to "analyzed" or "error", this swaps the polling shell out for the final UI.
 func (h *Handler) GetAnalysisStatus(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 	renderTemplate(w, h.partials, "analysis_status_partial.html", p)
@@ -201,10 +286,8 @@ func (h *Handler) GetAnalysisStatus(w http.ResponseWriter, r *http.Request) {
 
 // SubmitInstructions parses free-text edit instructions into a manifest via Claude.
 func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 
@@ -220,47 +303,59 @@ func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
 	p.Manifest = manifest
 	p.Status = domain.StatusManifestReady
 
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	renderTemplate(w, h.partials, "manifest_partial.html", p)
 }
 
 // RenderVideo executes the edit manifest through FFmpeg.
 func (h *Handler) RenderVideo(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
+		return
+	}
+
+	// Guard against duplicate submits (double-click, HTMX retry) spawning
+	// concurrent render goroutines that would race on the same local files.
+	if p.Status == domain.StatusRendering {
+		renderTemplate(w, h.partials, "status_partial.html", p)
 		return
 	}
 
 	p.Status = domain.StatusRendering
+	p.Error = ""
+	if err := h.store.Save(r.Context(), p); err != nil {
+		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	go func() {
 		if err := h.pipeline.Render(p); err != nil {
 			p.Status = domain.StatusError
 			p.Error = err.Error()
-			return
+		} else {
+			p.Status = domain.StatusDone
 		}
-		p.Status = domain.StatusDone
+		h.persistAsync(p)
 	}()
 
 	renderTemplate(w, h.partials, "status_partial.html", p)
 }
 
 func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 	renderTemplate(w, h.partials, "status_partial.html", p)
 }
 
 func (h *Handler) DownloadResult(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	p, ok := h.projects[id]
-	if !ok {
-		http.NotFound(w, r)
+	p := h.loadOr404(w, r)
+	if p == nil {
 		return
 	}
 

@@ -13,7 +13,8 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \
-  iamcredentials.googleapis.com
+  iamcredentials.googleapis.com \
+  firestore.googleapis.com
 
 # Create secrets (skips if they already exist). Prompts for the key value.
 for name in ANTHROPIC_API_KEY OPENAI_API_KEY; do
@@ -37,8 +38,9 @@ gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
   --allow-unauthenticated \
-  --memory 1Gi \
-  --cpu 1 \
+  --memory 4Gi \
+  --cpu 4 \
+  --no-cpu-throttling \
   --timeout 3600 \
   --set-env-vars "GCS_BUCKET=$BUCKET,WORK_DIR=/tmp/cutroom" \
   --set-secrets "ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest"
@@ -52,6 +54,11 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
 
 gcloud iam service-accounts add-iam-policy-binding "$SA" \
   --member="serviceAccount:$SA" --role="roles/iam.serviceAccountTokenCreator"
+
+# Allow the runtime SA to read/write Firestore for project persistence.
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member="serviceAccount:$SA" --role="roles/datastore.user" \
+  --condition=None >/dev/null
 
 echo "Done. URL:"
 gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)'
