@@ -27,7 +27,9 @@
         <p>Drop video files here</p>
         <p class="upload-sub">or</p>
         <label class="btn-secondary" for="clip-file-input">Choose files</label>
-        <input id="clip-file-input" type="file" accept="video/*" multiple
+        <input id="clip-file-input" type="file"
+               accept="video/*,.mov,.mp4,.m4v,.mkv,.webm,.avi,.hevc"
+               multiple
                style="display:none"
                onchange="uploadFiles(this, '{{.ID}}', '#clips-list')" />
       </div>

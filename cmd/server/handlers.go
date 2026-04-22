@@ -199,7 +199,7 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	objectName := "projects/" + p.ID + "/clips/" + uuid.New().String() + "-" + filepath.Base(req.Filename)
-	url, err := h.gcs.SignedUploadURL(objectName, req.ContentType)
+	url, err := h.gcs.SignedResumableInitURL(objectName, req.ContentType)
 	if err != nil {
 		http.Error(w, "sign failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -207,7 +207,7 @@ func (h *Handler) SignClipUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"uploadURL":   url,
+		"initURL":     url,
 		"objectName":  objectName,
 		"contentType": req.ContentType,
 	})
