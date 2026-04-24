@@ -16,8 +16,17 @@ import (
 	"github.com/mary/cutroom/internal/transcribe"
 )
 
+// Pipeline orchestrates the analyze → manifest → render flow.
+//
+// gcsClient is an interface (not *gcs.Client) so tests can swap in a fake
+// without touching real GCS. *gcs.Client satisfies this interface today.
+type gcsClient interface {
+	Download(ctx context.Context, objectName, localPath string) error
+	UploadFile(ctx context.Context, objectName, localPath, contentType string) (string, error)
+}
+
 type Pipeline struct {
-	gcs         *gcs.Client
+	gcs         gcsClient
 	transcriber *transcribe.WhisperClient
 	ai          *ai.AnthropicClient
 	workDir     string
@@ -31,6 +40,42 @@ func NewPipeline(g *gcs.Client, t *transcribe.WhisperClient, a *ai.AnthropicClie
 	os.MkdirAll(workDir, 0755)
 	return &Pipeline{gcs: g, transcriber: t, ai: a, workDir: workDir}
 }
+
+// ── Codec lock ──────────────────────────────────────────────────────────
+//
+// Every per-segment / per-card encode uses identical codec parameters so
+// the final concat step can stream-copy (`-c copy`) without re-encoding.
+// Drift in any of these values silently corrupts the concat output.
+
+const (
+	targetW  = 1920
+	targetH  = 1080
+	targetFR = 30
+	targetSR = 48000
+)
+
+// encodeArgs is the canonical set of encode parameters. EVERY intermediate
+// mp4 (segments AND title cards) is produced with exactly these flags so
+// concatIntermediates can use `-c copy`.
+var encodeArgs = []string{
+	"-c:v", "libx264",
+	"-preset", "veryfast",
+	"-crf", "23",
+	"-pix_fmt", "yuv420p",
+	"-r", fmt.Sprintf("%d", targetFR),
+	"-c:a", "aac",
+	"-ar", fmt.Sprintf("%d", targetSR),
+	"-ac", "2",
+	"-movflags", "+faststart",
+}
+
+// vNorm letterboxes any source video to targetW x targetH at targetFR fps.
+// Reused for segment encodes and (in PR-5) image card encodes — same
+// normalization applies because intermediates must match codec params.
+var vNorm = fmt.Sprintf(
+	"scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=%d,format=yuv420p",
+	targetW, targetH, targetW, targetH, targetFR,
+)
 
 // localClipPath returns the on-disk location for a clip, under the pipeline's
 // workDir. Render and Analyze both compute this the same way.
@@ -109,7 +154,17 @@ func (p *Pipeline) BuildManifest(ctx context.Context, proj *domain.Project, inst
 	return p.ai.BuildManifest(ctx, proj, instructions)
 }
 
-// Render executes the EditManifest through FFmpeg and uploads results to GCS.
+// Render executes the EditManifest as a sequence of independent ffmpeg
+// invocations (one per segment, one per title card) followed by a single
+// concat-demuxer step that stream-copies the intermediates into the final
+// mp4. This is meaningfully faster on long videos with many segments than
+// the previous monolithic filter_complex graph because each encode runs in
+// its own ffmpeg process and the concat does no decode/re-encode work.
+//
+// Failure policy: outDir is wiped at the top of every render so stale
+// intermediates from a previous failed run never participate. Any encode
+// error aborts immediately, sets Status=error, and leaves the partial
+// intermediates in /tmp for debugging. No auto-retry. Single attempt.
 func (p *Pipeline) Render(proj *domain.Project) error {
 	ctx := context.Background()
 	m := proj.Manifest
@@ -124,29 +179,66 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 	}
 
 	outDir := filepath.Join(p.workDir, proj.ID, "out")
-	os.MkdirAll(outDir, 0755)
+	// Wipe-and-recreate so partial state from a prior failed render never
+	// pollutes a fresh attempt. Concat demuxer is unforgiving about stale
+	// intermediates with mismatched codec params.
+	if err := os.RemoveAll(outDir); err != nil {
+		return fmt.Errorf("wipe outDir: %w", err)
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("create outDir: %w", err)
+	}
 
-	// 1. Generate .srt caption file
+	// 1. Generate .srt caption file.
 	captionPath := filepath.Join(outDir, "captions.srt")
 	if err := writeSRT(proj, captionPath); err != nil {
 		return fmt.Errorf("write SRT: %w", err)
 	}
 
-	// 2. Build and run the main FFmpeg command
-	mainOut := filepath.Join(outDir, "final.mp4")
-	cmd, err := buildFFmpegCommand(proj, m, mainOut)
-	if err != nil {
-		return fmt.Errorf("build ffmpeg command: %w", err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", strings.Join(cmd.Args, " "))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ffmpeg render: %w\n%s", err, tailLines(stderr.String(), 30))
+	// 2. Build clipID → local-path map for segment lookups.
+	clipPaths := make(map[string]string)
+	for i := range proj.Clips {
+		clipPaths[proj.Clips[i].ID] = p.localClipPath(proj.ID, &proj.Clips[i])
 	}
 
-	// 3. Cut reel if specified
+	// 3. Encode each segment and any cards that follow it as their own
+	//    intermediate mp4. Order matches the final concat list.
+	var intermediates []string
+	for i, seg := range m.Segments {
+		segOut := filepath.Join(outDir, fmt.Sprintf("seg_%03d.mp4", i))
+		clipPath, ok := clipPaths[seg.ClipID]
+		if !ok {
+			return fmt.Errorf("clip %s not found locally", seg.ClipID)
+		}
+		if err := encodeSegment(clipPath, seg.Start, seg.End, segOut); err != nil {
+			return fmt.Errorf("encode segment %d: %w", i, err)
+		}
+		intermediates = append(intermediates, segOut)
+
+		// Title cards inserted AFTER segment i.
+		for j, tc := range m.TitleCards {
+			if tc.AfterSegment != i {
+				continue
+			}
+			cardOut := filepath.Join(outDir, fmt.Sprintf("card_%03d_%03d.mp4", i, j))
+			if err := encodeTextCard(tc.Text, tc.Duration, cardOut); err != nil {
+				return fmt.Errorf("encode title card after segment %d: %w", i, err)
+			}
+			intermediates = append(intermediates, cardOut)
+		}
+	}
+
+	if len(intermediates) == 0 {
+		return fmt.Errorf("manifest produced no segments to encode")
+	}
+
+	// 4. Concat the intermediates into final.mp4 — pure stream copy.
+	mainOut := filepath.Join(outDir, "final.mp4")
+	if err := concatIntermediates(outDir, intermediates, mainOut); err != nil {
+		return fmt.Errorf("concat: %w", err)
+	}
+
+	// 5. Cut reel if specified (independent encode, untouched by the split).
 	reelOut := ""
 	if m.ReelSegment != nil {
 		reelOut = filepath.Join(outDir, "reel.mp4")
@@ -155,7 +247,7 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 		}
 	}
 
-	// 4. Upload results to GCS
+	// 6. Upload results to GCS.
 	outputGCSPath := "projects/" + proj.ID + "/output/final.mp4"
 	outputURL, err := p.gcs.UploadFile(ctx, outputGCSPath, mainOut, "video/mp4")
 	if err != nil {
@@ -182,88 +274,90 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 	return nil
 }
 
-// buildFFmpegCommand constructs an FFmpeg filter_complex command from the manifest.
-// It handles: clip trimming, title card overlays, cross-fade transitions.
-func buildFFmpegCommand(proj *domain.Project, m *domain.EditManifest, outPath string) (*exec.Cmd, error) {
-	clipPaths := make(map[string]string)
-	for _, clip := range proj.Clips {
-		clipPaths[clip.ID] = filepath.Join(os.Getenv("WORK_DIR"), proj.ID, clip.ID+filepath.Ext(clip.Name))
+// encodeSegment encodes a [start, end] subrange of clipPath into an mp4 at
+// outPath, normalized to the codec lock (encodeArgs + vNorm). Used for
+// every segment in the manifest.
+func encodeSegment(clipPath string, start, end float64, outPath string) error {
+	args := []string{"-y",
+		"-ss", fmt.Sprintf("%.3f", start),
+		"-to", fmt.Sprintf("%.3f", end),
+		"-i", clipPath,
+		"-vf", vNorm,
+		"-af", fmt.Sprintf("aresample=%d,aformat=sample_fmts=fltp:channel_layouts=stereo", targetSR),
 	}
+	args = append(args, encodeArgs...)
+	args = append(args, outPath)
+	return runFFmpeg(args)
+}
 
-	// Build input args
-	args := []string{"-y"} // overwrite output
-	inputIndex := 0
-	segInputMap := make(map[int]int) // segment order -> ffmpeg input index
+// encodeTextCard renders a text-only title card (white text on black, with
+// silence audio) into an mp4 at outPath, matching the codec lock so it
+// concats cleanly with adjacent segments. Replaced by encodeImageCard in
+// PR-5 once card uploads land.
+func encodeTextCard(text string, duration float64, outPath string) error {
+	args := []string{"-y",
+		"-f", "lavfi",
+		"-t", fmt.Sprintf("%.3f", duration),
+		"-i", fmt.Sprintf("color=c=black:s=%dx%d:r=%d", targetW, targetH, targetFR),
+		"-f", "lavfi",
+		"-t", fmt.Sprintf("%.3f", duration),
+		"-i", fmt.Sprintf("anullsrc=r=%d:cl=stereo", targetSR),
+		"-vf", fmt.Sprintf(
+			"drawtext=text='%s':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2,setsar=1",
+			escapeFfmpegText(text),
+		),
+	}
+	args = append(args, encodeArgs...)
+	args = append(args, outPath)
+	return runFFmpeg(args)
+}
 
-	for _, seg := range m.Segments {
-		path, ok := clipPaths[seg.ClipID]
-		if !ok {
-			return nil, fmt.Errorf("clip %s not found locally", seg.ClipID)
+// concatIntermediates joins the given intermediate mp4s into outPath using
+// ffmpeg's concat demuxer with stream copy. No decode, no re-encode — fast.
+// All inputs MUST share codec parameters (enforced via encodeArgs); drift
+// produces a corrupt or unplayable file.
+func concatIntermediates(outDir string, intermediates []string, outPath string) error {
+	if len(intermediates) == 0 {
+		return fmt.Errorf("concat: no inputs")
+	}
+	listPath := filepath.Join(outDir, "concat.txt")
+	var listBuf bytes.Buffer
+	for _, p := range intermediates {
+		// concat demuxer needs absolute paths or paths relative to listPath.
+		// Use abs to be safe across callers.
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("abs(%s): %w", p, err)
 		}
-		args = append(args,
-			"-ss", fmt.Sprintf("%.3f", seg.Start),
-			"-to", fmt.Sprintf("%.3f", seg.End),
-			"-i", path,
-		)
-		segInputMap[seg.Order] = inputIndex
-		inputIndex++
+		// Single-quote escape: ' becomes '\''
+		fmt.Fprintf(&listBuf, "file '%s'\n", strings.ReplaceAll(abs, "'", `'\''`))
 	}
-
-	// Build filter_complex: trim each segment, add title cards, concat
-	var filterParts []string
-	var concatInputs []string
-
-	const (
-		targetW  = 1920
-		targetH  = 1080
-		targetSR = 48000
-	)
-	vNorm := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p", targetW, targetH, targetW, targetH)
-	aNorm := fmt.Sprintf("aresample=%d,aformat=sample_fmts=fltp:channel_layouts=stereo", targetSR)
-
-	for i, seg := range m.Segments {
-		idx := segInputMap[seg.Order]
-		filterParts = append(filterParts, fmt.Sprintf("[%d:v]setpts=PTS-STARTPTS,%s[v%d]", idx, vNorm, i))
-		filterParts = append(filterParts, fmt.Sprintf("[%d:a]asetpts=PTS-STARTPTS,%s[a%d]", idx, aNorm, i))
-		concatInputs = append(concatInputs, fmt.Sprintf("[v%d][a%d]", i, i))
-
-		// Insert title card after this segment if specified
-		for _, tc := range m.TitleCards {
-			if tc.AfterSegment == i {
-				cardFilter := fmt.Sprintf(
-					"color=c=black:s=%dx%d:d=%.1f:r=30,drawtext=text='%s':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2,setsar=1,format=yuv420p[card%d]",
-					targetW, targetH, tc.Duration, escapeFfmpegText(tc.Text), i,
-				)
-				silenceFilter := fmt.Sprintf(
-					"aevalsrc=0:d=%.1f:s=%d,aformat=sample_fmts=fltp:channel_layouts=stereo[card%d_audio]",
-					tc.Duration, targetSR, i,
-				)
-				filterParts = append(filterParts, cardFilter, silenceFilter)
-				concatInputs = append(concatInputs, fmt.Sprintf("[card%d][card%d_audio]", i, i))
-			}
-		}
+	if err := os.WriteFile(listPath, listBuf.Bytes(), 0644); err != nil {
+		return fmt.Errorf("write concat list: %w", err)
 	}
-
-	n := len(concatInputs)
-	filterParts = append(filterParts,
-		strings.Join(concatInputs, "")+fmt.Sprintf("concat=n=%d:v=1:a=1[outv][outa]", n),
-	)
-
-	args = append(args,
-		"-filter_complex", strings.Join(filterParts, ";"),
-		"-filter_threads", "0",
-		"-filter_complex_threads", "0",
-		"-map", "[outv]",
-		"-map", "[outa]",
-		"-c:v", "libx264",
-		"-preset", "veryfast",
-		"-crf", "23",
-		"-c:a", "aac",
-		"-threads", "0",
+	args := []string{"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", listPath,
+		"-c", "copy",
+		"-movflags", "+faststart",
 		outPath,
-	)
+	}
+	return runFFmpeg(args)
+}
 
-	return exec.Command("ffmpeg", args...), nil
+// runFFmpeg executes ffmpeg with the given args, capturing stderr for error
+// messages. Stdout/stderr also stream to the host stderr for real-time logs.
+func runFFmpeg(args []string) error {
+	cmd := exec.Command("ffmpeg", args...)
+	var stderr bytes.Buffer
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	fmt.Fprintf(os.Stderr, "[ffmpeg] %s\n", strings.Join(cmd.Args, " "))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg: %w\n%s", err, tailLines(stderr.String(), 30))
+	}
+	return nil
 }
 
 func cutReel(proj *domain.Project, rs *domain.ReelSegment, outPath string) error {
@@ -278,7 +372,8 @@ func cutReel(proj *domain.Project, rs *domain.ReelSegment, outPath string) error
 		return fmt.Errorf("reel clip not found")
 	}
 
-	// Crop to 9:16 for Reels/Shorts
+	// Crop to 9:16 for Reels/Shorts. Reel is independent of the main concat
+	// pipeline so it can use its own codec params freely.
 	cmd := exec.Command("ffmpeg", "-y",
 		"-ss", fmt.Sprintf("%.3f", rs.Start),
 		"-to", fmt.Sprintf("%.3f", rs.End),
