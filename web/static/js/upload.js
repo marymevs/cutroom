@@ -14,6 +14,14 @@
 //   Single-shot PUTs to a signed URL fail totally on any network blip — a
 //   dealbreaker for multi-GB 4K phone clips on mobile networks. GCS resumable
 //   lets us keep the bytes that already made it across.
+//
+// Why an UploadAggregator:
+//   xhr.upload.onprogress fires bytes-uploaded-in-current-chunk values that
+//   are NOT yet committed. On a failed chunk those bytes have to be discarded
+//   or the per-tile bar appears to freeze (when we re-query GCS for the real
+//   offset and it's lower than what we optimistically displayed). The
+//   aggregator separates "committed" (GCS-acked) from "inflight" (xhr's local
+//   onprogress) so the UI never lies and never double-counts on retry.
 
 // Multiple of 256 KiB (GCS requirement for non-final chunks). 32 MiB is a
 // throughput sweet spot: big enough to amortize TLS/HTTP overhead, small
@@ -38,6 +46,11 @@ function uploadFiles(input, projectId, target) {
 async function uploadFilesArray(files, projectId, targetSelector) {
   const target = document.querySelector(targetSelector);
 
+  // One aggregator per upload batch — the single source of truth for this
+  // batch's progress. Per-tile renders are derived from it.
+  const aggregator = new UploadAggregator();
+  const startedAt = Date.now();
+
   const tiles = files.map((file) => {
     const tile = document.createElement('div');
     tile.className = 'clip-item uploading';
@@ -51,15 +64,20 @@ async function uploadFilesArray(files, projectId, targetSelector) {
     return tile;
   });
 
+  const ids = files.map((file) => aggregator.addFile(file.name, file.size));
+
   const results = await Promise.all(
-    files.map((file, i) => uploadOne(file, projectId, tiles[i]).catch((err) => {
-      console.error('Upload failed', file.name, err);
-      tiles[i].innerHTML =
-        `<span class="clip-icon">✗</span>` +
-        `<span class="clip-name">Failed: ${escapeHtml(file.name)} ` +
-        `<span class="clip-meta">— ${escapeHtml(err.message || 'network error')}</span></span>`;
-      return null;
-    }))
+    files.map((file, i) =>
+      uploadOne(file, projectId, tiles[i], aggregator, ids[i], startedAt).catch((err) => {
+        console.error('Upload failed', file.name, err);
+        aggregator.setStatus(ids[i], 'failed');
+        tiles[i].innerHTML =
+          `<span class="clip-icon">✗</span>` +
+          `<span class="clip-name">Failed: ${escapeHtml(file.name)} ` +
+          `<span class="clip-meta">— ${escapeHtml(err.message || 'network error')}</span></span>`;
+        return null;
+      })
+    )
   );
 
   if (results.some(Boolean) && target) {
@@ -69,7 +87,9 @@ async function uploadFilesArray(files, projectId, targetSelector) {
   }
 }
 
-async function uploadOne(file, projectId, tile) {
+async function uploadOne(file, projectId, tile, aggregator, fileId, startedAt) {
+  aggregator.setStatus(fileId, 'uploading');
+
   const contentType = file.type || 'application/octet-stream';
 
   const signResp = await fetchWithRetry(`/projects/${projectId}/clips/sign`, {
@@ -82,7 +102,7 @@ async function uploadOne(file, projectId, tile) {
 
   const sessionURL = await initResumableSession(initURL, contentType);
 
-  await uploadInChunks(sessionURL, file, contentType, tile);
+  await uploadInChunks(sessionURL, file, contentType, tile, aggregator, fileId, startedAt);
 
   const regResp = await fetchWithRetry(`/projects/${projectId}/clips/register`, {
     method: 'POST',
@@ -90,6 +110,9 @@ async function uploadOne(file, projectId, tile) {
     body: JSON.stringify({ filename: file.name, objectName }),
   });
   if (!regResp.ok) throw new Error(`register ${regResp.status}: ${await regResp.text()}`);
+
+  aggregator.setStatus(fileId, 'done');
+  renderTile(tile, aggregator.fileStats(fileId), startedAt);
 
   return { html: await regResp.text() };
 }
@@ -127,11 +150,17 @@ async function initResumableSession(initURL, contentType) {
 
 // Walk the file in CHUNK_SIZE pieces. On an irrecoverable-looking error,
 // ask GCS where it left off and resume from that offset.
-async function uploadInChunks(sessionURL, file, contentType, tile) {
+//
+// Aggregator wiring:
+//   - xhr.upload.onprogress → setInflight(id, loadedInChunk)
+//   - chunk acked (308 with new Range, or 200/201 done) → setCommitted(id, newOffset)
+//   - chunk failed → discardInflight(id), then resync from GCS and continue
+async function uploadInChunks(sessionURL, file, contentType, tile, aggregator, fileId, startedAt) {
   const total = file.size;
-  const started = Date.now();
   let offset = 0;
   let failureCount = 0;
+
+  aggregator.setCommitted(fileId, 0);
 
   while (offset < total) {
     const end = Math.min(offset + CHUNK_SIZE, total);
@@ -140,28 +169,36 @@ async function uploadInChunks(sessionURL, file, contentType, tile) {
     let result;
     try {
       result = await putChunk(sessionURL, blob, offset, end, total, contentType, (loadedInChunk) => {
-        updateProgress(tile, offset + loadedInChunk, total, started);
+        aggregator.setInflight(fileId, loadedInChunk);
+        renderTile(tile, aggregator.fileStats(fileId), startedAt);
       });
     } catch (err) {
+      // Discard whatever inflight bytes the failed chunk reported — those
+      // bytes are NOT acked by GCS and must not contribute to displayed
+      // progress. This is the regression fix for the "progress freezes /
+      // jumps backward on retry" bug.
+      aggregator.discardInflight(fileId);
+
       if (err.fatal) throw err;
-      // Transient error: resync with GCS and let the loop retry from there
-      // rather than guessing or re-sending bytes that already made it across.
       failureCount++;
       if (failureCount > MAX_CHUNK_RETRIES) throw err;
       await sleep(backoffMs(failureCount));
       offset = await queryResumeOffsetWithRetry(sessionURL, total);
-      updateProgress(tile, offset, total, started);
+      aggregator.setCommitted(fileId, offset);
+      renderTile(tile, aggregator.fileStats(fileId), startedAt);
       continue;
     }
     failureCount = 0;
 
     if (result.kind === 'done') {
-      updateProgress(tile, total, total, started);
+      aggregator.setCommitted(fileId, total);
+      renderTile(tile, aggregator.fileStats(fileId), startedAt);
       return;
     }
     // 'progress': GCS acknowledged through result.nextOffset - 1.
     offset = result.nextOffset;
-    updateProgress(tile, offset, total, started);
+    aggregator.setCommitted(fileId, offset);
+    renderTile(tile, aggregator.fileStats(fileId), startedAt);
   }
 }
 
@@ -273,16 +310,18 @@ async function fetchWithRetry(url, opts) {
   throw lastErr || new Error(`${url} failed`);
 }
 
-function updateProgress(tile, loaded, total, startedAt) {
-  const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+// renderTile updates a tile from the aggregator's per-file snapshot. Stays
+// idempotent so the same fileStats can be applied repeatedly without flicker.
+function renderTile(tile, fs, startedAt) {
+  if (!tile || !fs) return;
   const pctEl = tile.querySelector('.clip-pct');
-  if (pctEl) pctEl.textContent = `${pct}%`;
+  if (pctEl) pctEl.textContent = `${fs.pct}%`;
   const rateEl = tile.querySelector('.clip-rate');
   if (rateEl) {
     const elapsed = (Date.now() - startedAt) / 1000;
-    if (elapsed > 0.5 && loaded > 0) {
-      const bps = loaded / elapsed;
-      const remaining = Math.max(0, (total - loaded) / bps);
+    if (elapsed > 0.5 && fs.loaded > 0) {
+      const bps = fs.loaded / elapsed;
+      const remaining = Math.max(0, (fs.total - fs.loaded) / bps);
       rateEl.textContent = `· ${formatBytes(bps)}/s · ${formatEta(remaining)} left`;
     }
   }
