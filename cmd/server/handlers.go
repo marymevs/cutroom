@@ -55,7 +55,7 @@ func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *
 	if err != nil {
 		panic(err)
 	}
-	pageNames := []string{"index.html", "project.html"}
+	pageNames := []string{"index.html", "project.html", "cards.html"}
 	pages := make(map[string]*template.Template, len(pageNames))
 	for _, p := range pageNames {
 		files := append([]string{

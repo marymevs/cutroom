@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mary/cutroom/internal/ai"
+	"github.com/mary/cutroom/internal/cards"
 	"github.com/mary/cutroom/internal/editor"
 	"github.com/mary/cutroom/internal/gcs"
 	"github.com/mary/cutroom/internal/store"
@@ -43,6 +46,17 @@ func main() {
 
 	h := NewHandler(editPipeline, gcsClient, projectStore)
 
+	// Cards library (PR-6). Reuses the same Firestore client used by
+	// projectStore — cards are a separate collection.
+	cardStore := cards.NewCardStore(projectStore.Client())
+	cardsUploader := NewGCSCardUploader(
+		func(ctx context.Context, objectName string, data []byte, contentType string) (string, error) {
+			return gcsClient.Upload(ctx, objectName, bytes.NewReader(data), contentType)
+		},
+		gcsClient.ReadSignedURL,
+	)
+	cardsHandler := NewCardsHandler(cardStore, cardsUploader, h.pages["cards.html"], h.partials)
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -60,9 +74,19 @@ func main() {
 	r.Get("/projects/{id}/analysis-status", h.GetAnalysisStatus)
 	r.Get("/projects/{id}/download", h.DownloadResult)
 
+	// Card library
+	r.Get("/cards", cardsHandler.CardsPage)
+	r.Get("/cards/grid", cardsHandler.CardsGrid)
+	r.Post("/cards", cardsHandler.UploadCard)
+	r.Delete("/cards/{id}", cardsHandler.DeleteCard)
+
 	// Serve static files
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
 
 	log.Printf("cutroom running on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }
+
+// Compile-time assertion: io.Reader is satisfied by bytes.NewReader. The
+// import is real even though it's only used through the closure above.
+var _ io.Reader = bytes.NewReader(nil)

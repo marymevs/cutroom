@@ -690,3 +690,209 @@ textarea:focus { border-color: var(--accent); }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* ── Card library (PR-6) ─────────────────────────────────────────────── */
+
+.workspace-header .header-link {
+  margin-left: auto;
+  color: var(--accent3);
+  font-size: 12px;
+  text-decoration: none;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.workspace-header .header-link:hover { color: var(--accent); }
+
+.hero-secondary {
+  margin-top: 28px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.hero-link {
+  color: var(--accent3);
+  text-decoration: none;
+  letter-spacing: 0.04em;
+}
+.hero-link:hover { color: var(--accent); }
+
+.cards-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 32px 64px;
+}
+.cards-intro {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 16px 0 28px;
+  max-width: 640px;
+}
+
+.cards-upload-zone-wrap { margin-bottom: 32px; }
+.card-upload-zone {
+  /* Reuses .upload-zone — this class layers on a tighter footprint
+     since cards are small PNGs (≤10MB) not multi-GB videos. */
+  padding: 24px;
+}
+.card-upload-error {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px dashed #c0584a;
+  background: rgba(192, 88, 74, 0.08);
+  color: #e9a298;
+  font-size: 13px;
+  border-radius: var(--radius);
+}
+.card-upload-progress {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.card-warn {
+  margin-top: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius);
+}
+.card-warn h3 {
+  font-family: var(--mono);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+.card-warn p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.card-warn form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+@media (max-width: 960px) { .card-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 640px) { .card-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.card-grid-empty {
+  text-align: center;
+  padding: 60px 24px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.card-grid-empty h3 {
+  font-family: var(--display);
+  font-size: 28px;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+.card-grid-empty p {
+  color: var(--text-muted);
+  font-size: 14px;
+  max-width: 360px;
+  margin: 0 auto;
+}
+
+.card-tile {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.card-tile:hover { border-color: var(--accent2); }
+
+.card-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0a0a0a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.card-thumb-missing {
+  color: var(--text-muted);
+  font-size: 32px;
+}
+
+.card-meta {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.card-name {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-dims {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  margin-top: 2px;
+  letter-spacing: 0.04em;
+}
+
+.card-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.card-tile:hover .card-delete { opacity: 1; }
+@media (max-width: 640px) {
+  .card-delete { opacity: 1; } /* persistent on touch */
+}
+.card-delete:hover { background: #c0584a; color: #fff; }
+.card-delete:disabled { opacity: 0.4; cursor: wait; }
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  letter-spacing: 0.04em;
+}
+.btn-ghost:hover { color: var(--text); }

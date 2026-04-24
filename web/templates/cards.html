@@ -1,0 +1,35 @@
+{{define "content"}}
+<div class="cards-page" id="cards-page">
+
+  <div class="workspace-header">
+    <a href="/" class="back">← Projects</a>
+    <h2>Card Library</h2>
+  </div>
+
+  <p class="cards-intro">Upload PNG title cards from Canva, Figma, or anywhere. They’ll appear in your edit plan whenever Claude builds a manifest with title cards.</p>
+
+  <section class="cards-upload-zone-wrap">
+    <div class="upload-zone card-upload-zone"
+         ondragover="this.classList.add('drag-over'); event.preventDefault()"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="this.classList.remove('drag-over'); handleCardDrop(event, this)">
+      <div class="upload-icon">⬆</div>
+      <p>Drop a PNG title card here</p>
+      <p class="upload-sub">or</p>
+      <label class="btn-secondary" for="card-file-input">Choose file</label>
+      <input id="card-file-input" type="file"
+             accept="image/png,.png"
+             style="display:none"
+             onchange="uploadCardFile(this)" />
+    </div>
+    <div id="card-upload-feedback"></div>
+  </section>
+
+  <div id="cards-grid">
+    {{template "cards_grid_partial.html" .}}
+  </div>
+
+</div>
+
+<script src="/static/js/cards.js"></script>
+{{end}}

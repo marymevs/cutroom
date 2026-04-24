@@ -1,0 +1,19 @@
+{{define "card_warn_partial.html"}}
+<div class="card-warn" role="alert">
+  <h3>This is portrait — it’ll letterbox</h3>
+  <p>
+    <strong>{{.Filename}}</strong> is {{.Width}}×{{.Height}} (portrait).
+    Cutroom renders 16:9, so a portrait card will appear as a tall rectangle in the middle with black bars on either side.
+  </p>
+  <p>You can upload it anyway, or pick a 16:9 PNG instead.</p>
+  <form method="post" enctype="multipart/form-data" action="/cards"
+        onsubmit="rebindCardForce(this)">
+    <input type="hidden" name="name" value="{{.Name}}">
+    <input type="hidden" name="description" value="{{.Description}}">
+    <input type="hidden" name="force" value="1">
+    <input type="file" name="file" id="card-warn-file" style="display:none">
+    <button type="submit" class="btn-secondary">Upload anyway</button>
+    <button type="button" class="btn-ghost" onclick="dismissCardWarn(this)">Cancel</button>
+  </form>
+</div>
+{{end}}

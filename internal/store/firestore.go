@@ -41,6 +41,11 @@ func NewProjectStore(ctx context.Context, projectID string) (*ProjectStore, erro
 
 func (s *ProjectStore) Close() error { return s.client.Close() }
 
+// Client returns the underlying Firestore client. Used by the cards package
+// (and any other package that needs a separate collection) so we don't
+// open a second connection per concern.
+func (s *ProjectStore) Client() *firestore.Client { return s.client }
+
 // Save writes the full project document, overwriting any existing record.
 func (s *ProjectStore) Save(ctx context.Context, p *domain.Project) error {
 	_, err := s.client.Collection(projectsCollection).Doc(p.ID).Set(ctx, p)

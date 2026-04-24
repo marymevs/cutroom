@@ -1,0 +1,14 @@
+{{define "cards_grid_partial.html"}}
+{{if .Cards}}
+<div class="card-grid" role="grid" aria-label="Card library">
+  {{range .Cards}}
+    {{template "card_tile_partial.html" .}}
+  {{end}}
+</div>
+{{else}}
+<div class="card-grid-empty">
+  <h3>Upload your first title card</h3>
+  <p>PNGs from Canva, Figma, anywhere. Drop one in and the AI will place it in your edits.</p>
+</div>
+{{end}}
+{{end}}
