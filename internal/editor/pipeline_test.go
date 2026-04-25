@@ -139,16 +139,34 @@ func TestEncodeSegment_ProducesValidMP4WithLockedCodecParams(t *testing.T) {
 	}
 }
 
-// ── encodeTextCard ───────────────────────────────────────────────────────
+// ── encodeImageCard (PR-5) ───────────────────────────────────────────────
 
-func TestEncodeTextCard_ProducesValidMP4MatchingCodecLock(t *testing.T) {
+// makePNGFile writes a synthetic landscape PNG fixture to disk.
+func makePNGFile(t *testing.T, path string, w, h int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("color=c=red:s=%dx%d:d=0.1", w, h),
+		"-frames:v", "1",
+		path,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("makePNGFile: %v\n%s", err, string(out))
+	}
+}
+
+func TestEncodeImageCard_ProducesValidMP4MatchingCodecLock(t *testing.T) {
 	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "card.png")
+	makePNGFile(t, pngPath, 1920, 1080)
+
 	out := filepath.Join(dir, "card.mp4")
-	if err := encodeTextCard("Hello World", 2.5, out); err != nil {
-		// drawtext can fail in environments without fonts. Skip rather than
-		// fail so the rest of the suite still runs (Cloud Run/Docker has
-		// fonts; some local dev machines may not).
-		t.Skipf("encodeTextCard requires a usable font (drawtext): %v", err)
+	if err := encodeImageCard(pngPath, 2.5, out); err != nil {
+		t.Fatalf("encodeImageCard: %v", err)
 	}
 
 	dur := probeDur(t, out)
@@ -162,6 +180,32 @@ func TestEncodeTextCard_ProducesValidMP4MatchingCodecLock(t *testing.T) {
 	}
 	if aCodec != "aac" || sr != targetSR || ch != 2 {
 		t.Errorf("audio lock mismatch: codec=%s sr=%d ch=%d", aCodec, sr, ch)
+	}
+}
+
+func TestEncodeImageCard_LetterboxesNonStandardDimensions(t *testing.T) {
+	// CRITICAL: any uploaded PNG (100x100, 4096x4096, portrait, anything)
+	// must produce a 1920x1080 yuv420p output that concats cleanly with
+	// adjacent segments. The vNorm filter is what enforces this.
+	dir := t.TempDir()
+	cases := []struct{ name string; w, h int }{
+		{"tiny", 100, 100},
+		{"max-square", 4096, 4096},
+		{"portrait-effective", 540, 960}, // would have been rejected at upload but verify render math
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			png := filepath.Join(dir, tc.name+".png")
+			makePNGFile(t, png, tc.w, tc.h)
+			out := filepath.Join(dir, tc.name+".mp4")
+			if err := encodeImageCard(png, 1.5, out); err != nil {
+				t.Fatalf("encodeImageCard %s: %v", tc.name, err)
+			}
+			_, _, w, h, _, _, _, _ := probeStreams(t, out)
+			if w != targetW || h != targetH {
+				t.Errorf("%s: dims got %dx%d want %dx%d", tc.name, w, h, targetW, targetH)
+			}
+		})
 	}
 }
 
@@ -209,6 +253,108 @@ func TestConcatIntermediates_RejectsEmptyInput(t *testing.T) {
 	err := concatIntermediates(dir, nil, filepath.Join(dir, "out.mp4"))
 	if err == nil {
 		t.Fatal("expected error on empty input, got nil")
+	}
+}
+
+// ── ensureCardsLocal + orphan check (PR-5) ───────────────────────────────
+
+// fakeCardResolver satisfies the cardResolver interface for tests. cards
+// keyed by ID — return nil for absent IDs (mimics Firestore "not found").
+type fakeCardResolver struct{ cards map[string]*domain.Card }
+
+func (f *fakeCardResolver) Get(ctx context.Context, id string) (*domain.Card, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return f.cards[id], nil
+}
+
+func TestEnsureCardsLocal_DownloadsMissingSkipsPresent(t *testing.T) {
+	work := t.TempDir()
+	stash := t.TempDir()
+
+	// Stage one card PNG at a known GCS path.
+	makePNGFile(t, filepath.Join(stash, "cards/card-A.png"), 1920, 1080)
+
+	g := &fakeGCS{stashDir: stash}
+	resolver := &fakeCardResolver{cards: map[string]*domain.Card{
+		"card-A": {ID: "card-A", GCSPath: "cards/card-A.png"},
+	}}
+	p := &Pipeline{gcs: g, cards: resolver, workDir: work}
+
+	idA := "card-A"
+	m := &domain.EditManifest{
+		TitleCards: []domain.TitleCard{
+			{AfterSegment: 0, ImageID: &idA, Duration: 3.0},
+		},
+	}
+
+	if err := p.ensureCardsLocal(context.Background(), "proj-1", m); err != nil {
+		t.Fatalf("ensureCardsLocal first call: %v", err)
+	}
+	local := p.localCardPath("proj-1", "card-A")
+	if _, err := os.Stat(local); err != nil {
+		t.Fatalf("expected local card on disk: %v", err)
+	}
+
+	// Second call: file exists, should be a no-op (no extra Download call).
+	// We verify by removing the GCS-backed source and re-running — if it
+	// tries to re-download, it'll fail because the source is gone.
+	if err := os.Remove(filepath.Join(stash, "cards/card-A.png")); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ensureCardsLocal(context.Background(), "proj-1", m); err != nil {
+		t.Errorf("second call should be no-op (file already on disk): %v", err)
+	}
+}
+
+func TestEnsureCardsLocal_OrphanCheck_FailsFastWithActionableError(t *testing.T) {
+	// CRITICAL REGRESSION: a manifest referencing a deleted card must fail
+	// FAST with a clear, user-actionable message — not midway through render
+	// with a cryptic ffmpeg "input file not found" error.
+	work := t.TempDir()
+	stash := t.TempDir()
+
+	g := &fakeGCS{stashDir: stash}
+	resolver := &fakeCardResolver{cards: map[string]*domain.Card{}} // empty = card "deleted"
+	p := &Pipeline{gcs: g, cards: resolver, workDir: work}
+
+	idGone := "card-deleted"
+	m := &domain.EditManifest{
+		TitleCards: []domain.TitleCard{
+			{AfterSegment: 0, ImageID: &idGone, Duration: 3.0},
+		},
+	}
+
+	err := p.ensureCardsLocal(context.Background(), "proj-1", m)
+	if err == nil {
+		t.Fatal("expected error for orphan card, got nil")
+	}
+	if !strings.Contains(err.Error(), "no longer in your library") {
+		t.Errorf("expected actionable 'no longer in your library' message, got: %v", err)
+	}
+}
+
+func TestEnsureCardsLocal_NilImageIDFailsFast(t *testing.T) {
+	// A title card with no ImageID is invalid — UpdateManifest already
+	// drops these at form-save time, but render is the safety net.
+	work := t.TempDir()
+	g := &fakeGCS{stashDir: t.TempDir()}
+	resolver := &fakeCardResolver{cards: map[string]*domain.Card{}}
+	p := &Pipeline{gcs: g, cards: resolver, workDir: work}
+
+	m := &domain.EditManifest{
+		TitleCards: []domain.TitleCard{
+			{AfterSegment: 0, ImageID: nil, Duration: 3.0},
+		},
+	}
+
+	err := p.ensureCardsLocal(context.Background(), "proj-1", m)
+	if err == nil {
+		t.Fatal("expected error for nil ImageID, got nil")
+	}
+	if !strings.Contains(err.Error(), "no image_id") {
+		t.Errorf("expected 'no image_id' message, got: %v", err)
 	}
 }
 

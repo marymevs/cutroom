@@ -206,11 +206,18 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 	return analysis, nil
 }
 
-// BuildManifest takes user instructions + analysis and builds a complete
-// EditManifest. Runs with extended thinking enabled because the manifest
-// generation is the highest-stakes call in the pipeline — wrong cuts mean
-// a wrong video.
-func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Project, instructions string) (*domain.EditManifest, error) {
+// BuildManifest takes user instructions + analysis + the user's title card
+// library and builds a complete EditManifest. Runs with extended thinking
+// enabled because manifest generation is the highest-stakes call in the
+// pipeline — wrong cuts mean a wrong video.
+//
+// Library handling — the empty-library bridge:
+//   - When the user has zero cards uploaded, the system prompt is gated to
+//     return `title_cards: []`. There's no point asking Claude to pick
+//     image_ids that don't exist.
+//   - When the library has 1+ cards, Claude receives the library as part of
+//     the user message and is told to pick `image_id` from those entries.
+func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Project, library []*domain.Card, instructions string) (*domain.EditManifest, error) {
 	var clipsInfo strings.Builder
 	for _, clip := range proj.Clips {
 		clipsInfo.WriteString(fmt.Sprintf("- Clip: %s (ID: %s, Duration: %.1fs)\n", clip.Name, clip.ID, clip.Duration))
@@ -222,9 +229,16 @@ func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Projec
 		analysisInfo = fmt.Sprintf("Suggested cuts from transcript analysis:\n%s", string(analysisJSON))
 	}
 
-	system := []contentBlock{{
-		Type: "text",
-		Text: `You are a YouTube video editor. You will receive a list of clips, editorial analysis, and freeform editing instructions. Produce a structured edit manifest.
+	hasLibrary := len(library) > 0
+
+	// The system prompt branches on whether the user has any title cards
+	// uploaded. With cards: include image_id in the title_cards schema and
+	// tell Claude to pick from the library. Without cards: explicitly tell
+	// Claude to skip title_cards entirely so the manifest doesn't reference
+	// non-existent assets (the empty-library bridge).
+	var systemText string
+	if hasLibrary {
+		systemText = `You are a YouTube video editor. You will receive a list of clips, editorial analysis, the user's title card library, and freeform editing instructions. Produce a structured edit manifest.
 
 Respond ONLY with valid JSON. No preamble, no markdown. Schema:
 {
@@ -232,7 +246,7 @@ Respond ONLY with valid JSON. No preamble, no markdown. Schema:
     { "clip_id": "string", "start": 0.0, "end": 0.0, "order": 0, "description": "string" }
   ],
   "title_cards": [
-    { "after_segment": 0, "text": "string", "duration": 3.0, "style": "default" }
+    { "after_segment": 0, "image_id": "string", "duration": 3.0 }
   ],
   "output_cuts": [
     { "clip_id": "string", "start": 0.0, "end": 0.0, "description": "string" }
@@ -242,21 +256,67 @@ Respond ONLY with valid JSON. No preamble, no markdown. Schema:
 
 Rules:
 - segments are ordered video sections to include (after removing cuts)
-- title_cards are inserted BETWEEN segments using after_segment index
+- title_cards are full-frame cards inserted BETWEEN segments using after_segment index
+- image_id MUST be the ID of one of the cards in the user's library — never invent one
+- pick a card whose name and description fit the moment; if no card fits, omit the card entirely instead of using a wrong one
+- duration is in seconds (typical 2.5–4 seconds)
 - output_cuts are confirmed removals (can include suggested cuts from analysis)
 - reel_segment is the best 30-60s moment for a Short/Reel
-- style options: "default" (white text, black bg), "minimal" (small caps), "bold" (large centered)
-- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`,
+- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`
+	} else {
+		systemText = `You are a YouTube video editor. You will receive a list of clips, editorial analysis, and freeform editing instructions. Produce a structured edit manifest.
+
+Respond ONLY with valid JSON. No preamble, no markdown. Schema:
+{
+  "segments": [
+    { "clip_id": "string", "start": 0.0, "end": 0.0, "order": 0, "description": "string" }
+  ],
+  "title_cards": [],
+  "output_cuts": [
+    { "clip_id": "string", "start": 0.0, "end": 0.0, "description": "string" }
+  ],
+  "reel_segment": { "clip_id": "string", "start": 0.0, "end": 0.0 }
+}
+
+Rules:
+- segments are ordered video sections to include (after removing cuts)
+- title_cards MUST be the empty array — the user has not uploaded any title cards yet, so don't reference any
+- output_cuts are confirmed removals (can include suggested cuts from analysis)
+- reel_segment is the best 30-60s moment for a Short/Reel
+- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`
+	}
+
+	system := []contentBlock{{
+		Type:         "text",
+		Text:         systemText,
 		CacheControl: &cacheControl{Type: "ephemeral"},
 	}}
+
+	// Build the per-call user message. Library entries (if any) live here
+	// because they vary per request and shouldn't poison the prompt cache.
+	var libraryInfo string
+	if hasLibrary {
+		var lb strings.Builder
+		lb.WriteString("Title card library (pick image_id from these):\n")
+		for _, card := range library {
+			lb.WriteString(fmt.Sprintf("- ID: %s | Name: %s", card.ID, card.Name))
+			if card.Description != "" {
+				lb.WriteString(" | Description: " + card.Description)
+			}
+			lb.WriteString("\n")
+		}
+		libraryInfo = lb.String()
+	}
 
 	user := fmt.Sprintf(`Clips:
 %s
 
 %s
 
+%s
+
 Editor instructions:
-%s`, clipsInfo.String(), analysisInfo, instructions)
+%s`, clipsInfo.String(), analysisInfo, libraryInfo, instructions)
 
 	raw, err := c.complete(ctx, anthropicRequest{
 		Model:     modelID,
@@ -282,9 +342,8 @@ Editor instructions:
 		} `json:"segments"`
 		TitleCards []struct {
 			AfterSegment int     `json:"after_segment"`
-			Text         string  `json:"text"`
+			ImageID      string  `json:"image_id"`
 			Duration     float64 `json:"duration"`
-			Style        string  `json:"style"`
 		} `json:"title_cards"`
 		OutputCuts []struct {
 			ClipID      string  `json:"clip_id"`
@@ -305,6 +364,16 @@ Editor instructions:
 
 	manifest := &domain.EditManifest{}
 
+	// Build a set of valid library IDs so we can defensively drop
+	// hallucinated image_ids from Claude's response. Without this filter
+	// a stray ID slips into the manifest and the orphan check fires at
+	// render time — the orphan check IS the load-bearing safety net but
+	// dropping bad refs at parse time is friendlier UX.
+	validIDs := make(map[string]bool, len(library))
+	for _, c := range library {
+		validIDs[c.ID] = true
+	}
+
 	for _, s := range result.Segments {
 		manifest.Segments = append(manifest.Segments, domain.Segment{
 			ClipID:      s.ClipID,
@@ -315,11 +384,21 @@ Editor instructions:
 		})
 	}
 	for _, tc := range result.TitleCards {
+		var imageID *string
+		if tc.ImageID != "" && validIDs[tc.ImageID] {
+			id := tc.ImageID
+			imageID = &id
+		}
+		// If the model returned a card-shaped entry but the image_id is
+		// blank or hallucinated, skip the entry entirely. A title card
+		// with no image is meaningless.
+		if imageID == nil {
+			continue
+		}
 		manifest.TitleCards = append(manifest.TitleCards, domain.TitleCard{
 			AfterSegment: tc.AfterSegment,
-			Text:         tc.Text,
+			ImageID:      imageID,
 			Duration:     tc.Duration,
-			Style:        tc.Style,
 		})
 	}
 	for _, oc := range result.OutputCuts {

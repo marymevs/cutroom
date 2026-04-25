@@ -36,7 +36,6 @@ func main() {
 
 	transcriber := transcribe.NewWhisperClient(os.Getenv("OPENAI_API_KEY"))
 	aiClient := ai.NewAnthropicClient(os.Getenv("ANTHROPIC_API_KEY"))
-	editPipeline := editor.NewPipeline(gcsClient, transcriber, aiClient)
 
 	projectStore, err := store.NewProjectStore(context.Background(), os.Getenv("FIRESTORE_PROJECT_ID"))
 	if err != nil {
@@ -44,11 +43,15 @@ func main() {
 	}
 	defer projectStore.Close()
 
-	h := NewHandler(editPipeline, gcsClient, projectStore)
-
-	// Cards library (PR-6). Reuses the same Firestore client used by
-	// projectStore — cards are a separate collection.
+	// Cards library. Reuses the same Firestore client used by projectStore
+	// — cards are a separate collection. The store satisfies both the
+	// CardsHandler's storage interface AND the Pipeline's cardResolver
+	// interface (it has a Get method).
 	cardStore := cards.NewCardStore(projectStore.Client())
+
+	editPipeline := editor.NewPipeline(gcsClient, transcriber, aiClient, cardStore)
+	h := NewHandler(editPipeline, gcsClient, projectStore, cardStore)
+
 	cardsUploader := NewGCSCardUploader(
 		func(ctx context.Context, objectName string, data []byte, contentType string) (string, error) {
 			return gcsClient.Upload(ctx, objectName, bytes.NewReader(data), contentType)

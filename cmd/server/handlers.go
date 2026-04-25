@@ -44,13 +44,14 @@ type Handler struct {
 	pipeline *editor.Pipeline
 	gcs      *gcs.Client
 	store    *store.ProjectStore
+	cards    cardStorage // PR-5: read library for BuildManifest, lookup for picker
 	mu       sync.RWMutex
 	projects map[string]*domain.Project   // in-memory cache of Firestore docs
 	pages    map[string]*template.Template // page name -> layout+page set
 	partials *template.Template            // partials rendered standalone (HTMX)
 }
 
-func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *store.ProjectStore) *Handler {
+func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *store.ProjectStore, cardStore cardStorage) *Handler {
 	partialFiles, err := filepath.Glob("web/templates/*_partial.html")
 	if err != nil {
 		panic(err)
@@ -69,6 +70,7 @@ func NewHandler(pipeline *editor.Pipeline, gcsClient *gcs.Client, projectStore *
 		pipeline: pipeline,
 		gcs:      gcsClient,
 		store:    projectStore,
+		cards:    cardStore,
 		projects: make(map[string]*domain.Project),
 		pages:    pages,
 		partials: partials,
@@ -310,13 +312,20 @@ func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	instructions := r.FormValue("instructions")
 
-	manifest, err := h.pipeline.BuildManifest(r.Context(), p, instructions)
+	library, err := h.cards.List(r.Context())
+	if err != nil {
+		http.Error(w, "list card library: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	manifest, err := h.pipeline.BuildManifest(r.Context(), p, library, instructions)
 	if err != nil {
 		http.Error(w, "failed to build edit manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	p.Manifest = manifest
+	p.ReferencedCardIDs = referencedCardIDs(manifest)
 	p.Status = domain.StatusManifestReady
 
 	if err := h.store.Save(r.Context(), p); err != nil {
@@ -325,6 +334,25 @@ func (h *Handler) SubmitInstructions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderTemplate(w, h.partials, "manifest_partial.html", p)
+}
+
+// referencedCardIDs returns the deduplicated set of ImageIDs across all
+// title cards in m. Used to maintain Project.ReferencedCardIDs as a
+// denormalized index for the (future) array-contains delete check.
+func referencedCardIDs(m *domain.EditManifest) []string {
+	if m == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(m.TitleCards))
+	var out []string
+	for _, tc := range m.TitleCards {
+		if tc.ImageID == nil || seen[*tc.ImageID] {
+			continue
+		}
+		seen[*tc.ImageID] = true
+		out = append(out, *tc.ImageID)
+	}
+	return out
 }
 
 // UpdateManifest replaces the project's edit plan with user-edited values
@@ -364,15 +392,24 @@ func (h *Handler) UpdateManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tcAfter := r.Form["tc_after_segment"]
-	tcText := r.Form["tc_text"]
+	tcImageID := r.Form["tc_image_id"]
 	tcDur := r.Form["tc_duration"]
-	tcStyle := r.Form["tc_style"]
-	for i := range tcText {
+	for i := range tcImageID {
+		id := tcImageID[i]
+		var imgPtr *string
+		if id != "" {
+			imgPtr = &id
+		}
+		// Drop title cards with no card picked. Saving a placeholder slot
+		// without an image_id would silently break render later via the
+		// orphan check; better to reject at form-save time.
+		if imgPtr == nil {
+			continue
+		}
 		manifest.TitleCards = append(manifest.TitleCards, domain.TitleCard{
 			AfterSegment: parseIntAt(tcAfter, i),
-			Text:         tcText[i],
+			ImageID:      imgPtr,
 			Duration:     parseFloatAt(tcDur, i),
-			Style:        getAt(tcStyle, i),
 		})
 	}
 
@@ -398,6 +435,7 @@ func (h *Handler) UpdateManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.Manifest = manifest
+	p.ReferencedCardIDs = referencedCardIDs(manifest)
 	p.Status = domain.StatusManifestReady
 	if err := h.store.Save(r.Context(), p); err != nil {
 		http.Error(w, "save project: "+err.Error(), http.StatusInternalServerError)
