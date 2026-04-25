@@ -25,20 +25,28 @@ type gcsClient interface {
 	UploadFile(ctx context.Context, objectName, localPath, contentType string) (string, error)
 }
 
+// cardResolver looks up a Card by ID. The handler layer (which already
+// knows about Firestore) provides this so Pipeline doesn't grow a
+// dependency on the cards package's storage implementation.
+type cardResolver interface {
+	Get(ctx context.Context, id string) (*domain.Card, error)
+}
+
 type Pipeline struct {
 	gcs         gcsClient
+	cards       cardResolver
 	transcriber *transcribe.WhisperClient
 	ai          *ai.AnthropicClient
 	workDir     string
 }
 
-func NewPipeline(g *gcs.Client, t *transcribe.WhisperClient, a *ai.AnthropicClient) *Pipeline {
+func NewPipeline(g *gcs.Client, t *transcribe.WhisperClient, a *ai.AnthropicClient, cards cardResolver) *Pipeline {
 	workDir := os.Getenv("WORK_DIR")
 	if workDir == "" {
 		workDir = "/tmp/cutroom"
 	}
 	os.MkdirAll(workDir, 0755)
-	return &Pipeline{gcs: g, transcriber: t, ai: a, workDir: workDir}
+	return &Pipeline{gcs: g, cards: cards, transcriber: t, ai: a, workDir: workDir}
 }
 
 // ── Codec lock ──────────────────────────────────────────────────────────
@@ -149,9 +157,50 @@ func (p *Pipeline) Analyze(proj *domain.Project) error {
 	return nil
 }
 
-// BuildManifest combines user free-text instructions + analysis into a structured edit plan.
-func (p *Pipeline) BuildManifest(ctx context.Context, proj *domain.Project, instructions string) (*domain.EditManifest, error) {
-	return p.ai.BuildManifest(ctx, proj, instructions)
+// BuildManifest combines user free-text instructions + analysis + the
+// user's card library into a structured edit plan. An empty library is
+// the cue for the AI to skip title cards entirely (empty-library bridge).
+func (p *Pipeline) BuildManifest(ctx context.Context, proj *domain.Project, library []*domain.Card, instructions string) (*domain.EditManifest, error) {
+	return p.ai.BuildManifest(ctx, proj, library, instructions)
+}
+
+// localCardPath returns where a card's PNG lives on disk during render.
+func (p *Pipeline) localCardPath(projID, cardID string) string {
+	return filepath.Join(p.workDir, projID, "cards", cardID+".png")
+}
+
+// ensureCardsLocal resolves every TitleCard.ImageID in the manifest to a
+// local PNG. Mirrors ensureClipsLocal — Cloud Run's /tmp is ephemeral and
+// a render request can land on a fresh instance with no cards on disk.
+//
+// The orphan check is fused in: if any ImageID can't be resolved (card
+// deleted out from under the manifest, hallucinated by the AI, etc.) we
+// fail FAST with an actionable error rather than letting it explode
+// mid-encode with a cryptic ffmpeg input failure.
+func (p *Pipeline) ensureCardsLocal(ctx context.Context, projID string, m *domain.EditManifest) error {
+	for i, tc := range m.TitleCards {
+		if tc.ImageID == nil {
+			return fmt.Errorf("title card %d has no image_id — re-pick a card and try again", i)
+		}
+		card, err := p.cards.Get(ctx, *tc.ImageID)
+		if err != nil {
+			return fmt.Errorf("look up title card %d: %w", i, err)
+		}
+		if card == nil {
+			return fmt.Errorf("title card %d (id=%s) is no longer in your library — re-pick a card and try again", i, *tc.ImageID)
+		}
+		local := p.localCardPath(projID, *tc.ImageID)
+		if _, err := os.Stat(local); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
+			return err
+		}
+		if err := p.gcs.Download(ctx, card.GCSPath, local); err != nil {
+			return fmt.Errorf("download title card %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // Render executes the EditManifest as a sequence of independent ffmpeg
@@ -176,6 +225,13 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 	// instance that never ran Analyze. Re-download any clip that isn't on disk.
 	if err := p.ensureClipsLocal(ctx, proj); err != nil {
 		return fmt.Errorf("rehydrate clips: %w", err)
+	}
+
+	// Resolve every TitleCard.ImageID to a local PNG. Fails FAST if any
+	// referenced card is missing (orphan check) — far better UX than a
+	// cryptic ffmpeg input error mid-encode.
+	if err := p.ensureCardsLocal(ctx, proj.ID, m); err != nil {
+		return fmt.Errorf("rehydrate cards: %w", err)
 	}
 
 	outDir := filepath.Join(p.workDir, proj.ID, "out")
@@ -215,13 +271,18 @@ func (p *Pipeline) Render(proj *domain.Project) error {
 		}
 		intermediates = append(intermediates, segOut)
 
-		// Title cards inserted AFTER segment i.
+		// Title cards inserted AFTER segment i. ensureCardsLocal already
+		// validated that every ImageID resolves to a real on-disk PNG.
 		for j, tc := range m.TitleCards {
 			if tc.AfterSegment != i {
 				continue
 			}
+			if tc.ImageID == nil {
+				return fmt.Errorf("title card %d.%d has nil ImageID — orphan check should have caught this", i, j)
+			}
+			cardPath := p.localCardPath(proj.ID, *tc.ImageID)
 			cardOut := filepath.Join(outDir, fmt.Sprintf("card_%03d_%03d.mp4", i, j))
-			if err := encodeTextCard(tc.Text, tc.Duration, cardOut); err != nil {
+			if err := encodeImageCard(cardPath, tc.Duration, cardOut); err != nil {
 				return fmt.Errorf("encode title card after segment %d: %w", i, err)
 			}
 			intermediates = append(intermediates, cardOut)
@@ -290,22 +351,22 @@ func encodeSegment(clipPath string, start, end float64, outPath string) error {
 	return runFFmpeg(args)
 }
 
-// encodeTextCard renders a text-only title card (white text on black, with
-// silence audio) into an mp4 at outPath, matching the codec lock so it
-// concats cleanly with adjacent segments. Replaced by encodeImageCard in
-// PR-5 once card uploads land.
-func encodeTextCard(text string, duration float64, outPath string) error {
+// encodeImageCard renders an uploaded PNG as a full-frame title card mp4
+// at outPath: looped image input + silence audio + the same vNorm
+// letterbox the segment encoder uses (so any PNG dimension produces a
+// 1920x1080 yuv420p output that concats cleanly with adjacent segments).
+//
+// The wedge: this is what makes the user's Canva-designed brand asset
+// actually appear in the final video.
+func encodeImageCard(cardPath string, duration float64, outPath string) error {
 	args := []string{"-y",
-		"-f", "lavfi",
+		"-loop", "1",
 		"-t", fmt.Sprintf("%.3f", duration),
-		"-i", fmt.Sprintf("color=c=black:s=%dx%d:r=%d", targetW, targetH, targetFR),
+		"-i", cardPath,
 		"-f", "lavfi",
 		"-t", fmt.Sprintf("%.3f", duration),
 		"-i", fmt.Sprintf("anullsrc=r=%d:cl=stereo", targetSR),
-		"-vf", fmt.Sprintf(
-			"drawtext=text='%s':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2,setsar=1",
-			escapeFfmpegText(text),
-		),
+		"-vf", vNorm,
 	}
 	args = append(args, encodeArgs...)
 	args = append(args, outPath)
@@ -434,12 +495,6 @@ func srtTimestamp(secs float64) string {
 	s := int(secs) % 60
 	ms := int((secs - float64(int(secs))) * 1000)
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
-}
-
-func escapeFfmpegText(s string) string {
-	s = strings.ReplaceAll(s, "'", "\\'")
-	s = strings.ReplaceAll(s, ":", "\\:")
-	return s
 }
 
 func tailLines(s string, n int) string {

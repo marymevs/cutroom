@@ -86,7 +86,7 @@ func TestBuildManifest_GoldenOutput(t *testing.T) {
 			{"clip_id": "clip-1", "start": 0.0, "end": 5.0, "order": 0, "description": "intro handshake"}
 		],
 		"title_cards": [
-			{"after_segment": 0, "text": "The History", "duration": 3.0, "style": "default"}
+			{"after_segment": 0, "image_id": "card-history", "duration": 3.0}
 		],
 		"output_cuts": [],
 		"reel_segment": {"clip_id": "clip-1", "start": 5.0, "end": 35.0}
@@ -98,7 +98,8 @@ func TestBuildManifest_GoldenOutput(t *testing.T) {
 		Name:  "Test Project",
 		Clips: []domain.Clip{{ID: "clip-1", Name: "intro.mp4", Duration: 60.0}},
 	}
-	manifest, err := c.BuildManifest(context.Background(), proj, "Use the intro, add a title card.")
+	library := []*domain.Card{{ID: "card-history", Name: "History card"}}
+	manifest, err := c.BuildManifest(context.Background(), proj, library, "Use the intro, add a title card.")
 	if err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
@@ -106,11 +107,67 @@ func TestBuildManifest_GoldenOutput(t *testing.T) {
 	if len(manifest.Segments) != 1 || manifest.Segments[0].ClipID != "clip-1" {
 		t.Errorf("segments mismatch: %+v", manifest.Segments)
 	}
-	if len(manifest.TitleCards) != 1 || manifest.TitleCards[0].Text != "The History" {
+	if len(manifest.TitleCards) != 1 || manifest.TitleCards[0].ImageID == nil || *manifest.TitleCards[0].ImageID != "card-history" {
 		t.Errorf("title cards mismatch: %+v", manifest.TitleCards)
 	}
 	if manifest.ReelSegment == nil || manifest.ReelSegment.ClipID != "clip-1" {
 		t.Errorf("reel segment mismatch: %+v", manifest.ReelSegment)
+	}
+}
+
+func TestBuildManifest_DropsHallucinatedImageIDs(t *testing.T) {
+	// CRITICAL: even with a valid library context, the model can return
+	// an image_id that's not in the library. The defensive filter must
+	// drop those entries instead of letting them crash render later.
+	canned := `{
+		"segments": [{"clip_id":"c1","start":0,"end":5,"order":0,"description":"x"}],
+		"title_cards": [
+			{"after_segment": 0, "image_id": "card-real", "duration": 3.0},
+			{"after_segment": 0, "image_id": "card-fake", "duration": 3.0}
+		],
+		"output_cuts": [], "reel_segment": null
+	}`
+	var got anthropicRequest
+	c, _ := newTestClient(t, captureRequest(t, &got, canned))
+
+	library := []*domain.Card{{ID: "card-real", Name: "Real"}}
+	manifest, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, library, "x")
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	if len(manifest.TitleCards) != 1 {
+		t.Fatalf("expected 1 valid title card, got %d: %+v", len(manifest.TitleCards), manifest.TitleCards)
+	}
+	if manifest.TitleCards[0].ImageID == nil || *manifest.TitleCards[0].ImageID != "card-real" {
+		t.Errorf("expected card-real, got %+v", manifest.TitleCards[0])
+	}
+}
+
+func TestBuildManifest_EmptyLibraryGatesPromptToSkipCards(t *testing.T) {
+	// CRITICAL: empty-library bridge. With zero cards uploaded the system
+	// prompt must instruct the model to return an empty title_cards list,
+	// AND the response parser must produce no cards even if the model
+	// disobeys.
+	canned := `{
+		"segments": [{"clip_id":"c1","start":0,"end":5,"order":0,"description":"x"}],
+		"title_cards": [
+			{"after_segment": 0, "image_id": "card-fake", "duration": 3.0}
+		],
+		"output_cuts": [], "reel_segment": null
+	}`
+	var got anthropicRequest
+	c, _ := newTestClient(t, captureRequest(t, &got, canned))
+
+	manifest, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, nil, "x")
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	if len(manifest.TitleCards) != 0 {
+		t.Errorf("empty library: expected zero title cards even if model disobeys, got %d", len(manifest.TitleCards))
+	}
+	// Prompt should mention that the user has no cards uploaded.
+	if !strings.Contains(got.System[0].Text, "MUST be the empty array") {
+		t.Errorf("expected empty-library guard in system prompt, got: %s", got.System[0].Text)
 	}
 }
 
@@ -119,7 +176,7 @@ func TestBuildManifest_RequestShape(t *testing.T) {
 	var got anthropicRequest
 	c, _ := newTestClient(t, captureRequest(t, &got, canned))
 
-	_, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, "no-op")
+	_, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, nil, "no-op")
 	if err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
@@ -186,7 +243,7 @@ func TestComplete_SkipsThinkingBlocksAndReturnsText(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	manifest, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, "no-op")
+	manifest, err := c.BuildManifest(context.Background(), &domain.Project{Name: "P"}, nil, "no-op")
 	if err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}

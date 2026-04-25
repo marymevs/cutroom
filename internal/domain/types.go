@@ -50,6 +50,12 @@ type Project struct {
 	OutputURL  string        // GCS signed URL for final video
 	ReelsURL   string        // GCS signed URL for reel clip
 	CaptionURL string        // GCS signed URL for .srt file
+
+	// ReferencedCardIDs is a denormalized index of every card referenced
+	// by Manifest.TitleCards. Maintained on every manifest save so the
+	// /cards delete handler can find referencing projects in O(1) via a
+	// Firestore array-contains query instead of scanning every project.
+	ReferencedCardIDs []string
 }
 
 // Clip is a single uploaded video file.
@@ -113,12 +119,17 @@ type Segment struct {
 	Description string // plain-English summary shown in the edit-plan UI
 }
 
-// TitleCard is a text overlay to insert between segments.
+// TitleCard is a full-frame card inserted between segments. The card
+// content is an uploaded PNG identified by ImageID; the legacy text-only
+// path was removed in PR-5 alongside the picker UI.
+//
+// ImageID is a pointer because a TitleCard with no card selected (e.g. a
+// freshly-deserialized manifest where the picker hasn't been touched) is
+// allowed in the schema; renders fail fast in that case (orphan check).
 type TitleCard struct {
-	AfterSegment int    // insert after this segment index
-	Text         string
+	AfterSegment int     // insert after this segment index (0-based)
+	ImageID      *string // pointer into the user's card library
 	Duration     float64 // seconds
-	Style        string  // "default", "minimal", "bold"
 }
 
 // Cut is a confirmed removal from a clip.

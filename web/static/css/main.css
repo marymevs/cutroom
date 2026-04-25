@@ -896,3 +896,125 @@ textarea:focus { border-color: var(--accent); }
   letter-spacing: 0.04em;
 }
 .btn-ghost:hover { color: var(--text); }
+
+/* ── Card picker popover (PR-5) ──────────────────────────────────────── */
+
+.plan-row--card { position: relative; }
+
+.card-picker-trigger {
+  background: transparent;
+  border: 1px dashed var(--border);
+  padding: 4px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-picker-trigger:hover { border-color: var(--accent2); }
+
+.card-picker-thumb-wrap {
+  width: 80px;
+  height: 45px;
+  background: #0a0a0a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.card-picker-thumb-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.card-picker-thumb-placeholder {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  letter-spacing: 0.05em;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.plan-row--card[data-image-id]:not([data-image-id=""]) .card-picker-trigger {
+  border-style: solid;
+  border-color: var(--accent3);
+}
+
+.card-picker-popover {
+  position: absolute;
+  top: 100%;
+  left: 12px;
+  z-index: 100;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  width: min(420px, calc(100vw - 32px));
+  margin-top: 8px;
+}
+.card-picker-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.card-picker-filter {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.card-picker-upload-link {
+  font-size: 11px;
+  color: var(--accent3);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.card-picker-upload-link:hover { color: var(--accent); }
+
+.card-picker-grid {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px;
+}
+.card-picker-grid .card-grid {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.card-picker-grid .card-tile {
+  cursor: pointer;
+}
+.card-picker-grid .card-tile:hover {
+  border-color: var(--accent);
+}
+.card-picker-grid .card-thumb {
+  /* Smaller in the picker than on the library page. */
+  aspect-ratio: 16 / 9;
+}
+
+@media (max-width: 480px) {
+  .card-picker-popover {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    max-height: 60vh;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+}
+
+.card-picker-error {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
