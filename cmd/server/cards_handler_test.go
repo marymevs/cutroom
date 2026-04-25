@@ -396,6 +396,38 @@ func TestDeleteCard_UnknownIDIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCardsPage_RendersFullPageWithLayout(t *testing.T) {
+	// CRITICAL REGRESSION: GET /cards used to call ExecuteTemplate with
+	// the page name ("cards.html") instead of the layout template, which
+	// silently wrote an empty body. The fix renders "layout.html" so the
+	// page actually shows up. Empty body is a deploy-breaker.
+	_, _, _, router := newTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/cards", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status: got %d want 200", w.Code)
+	}
+	body := w.Body.String()
+	// The page must contain the layout shell AND the page-specific content.
+	mustContain := []string{
+		"<!DOCTYPE html>",        // from layout.html
+		"site-header",            // layout shell class
+		"Card Library",           // cards.html h2
+		"Upload your first title card", // empty-state copy
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(body, s) {
+			t.Errorf("page body missing %q. Got %d bytes:\n%s", s, len(body), body)
+		}
+	}
+	if len(body) < 500 {
+		t.Errorf("page body suspiciously short (%d bytes) — template likely rendered nothing", len(body))
+	}
+}
+
 func TestCardsGrid_RendersEmptyState(t *testing.T) {
 	_, _, _, router := newTestHandler(t)
 
