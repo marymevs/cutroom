@@ -1018,3 +1018,127 @@ textarea:focus { border-color: var(--accent); }
   color: var(--text-muted);
   font-size: 13px;
 }
+
+/* ── Per-clip sections in manifest review ───────────────────────────── */
+
+.plan-clip-section {
+  margin-top: 24px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.plan-clip-section + .plan-clip-section {
+  margin-top: 16px;
+}
+
+.plan-clip-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.plan-clip-icon { font-size: 16px; }
+.plan-clip-name {
+  font-family: var(--display);
+  font-size: 20px;
+  color: var(--accent);
+  flex: 1;
+}
+.plan-clip-duration {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+.plan-section--inclip {
+  margin-top: 12px;
+  padding-left: 4px;
+}
+.plan-section--inclip:first-child {
+  margin-top: 0;
+}
+.plan-section--inclip .plan-section-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  font-family: var(--mono);
+  font-weight: normal;
+}
+
+/* ── Per-clip analysis cards ────────────────────────────────────────── */
+
+.analysis-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
+.clip-analysis-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.clip-analysis-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  background: var(--surface);
+}
+
+.clip-analysis-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.clip-analysis-icon { font-size: 14px; }
+.clip-analysis-name {
+  font-family: var(--display);
+  font-size: 18px;
+  color: var(--accent);
+  flex: 1;
+}
+.clip-analysis-badges {
+  display: flex;
+  gap: 6px;
+}
+.badge-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  text-transform: uppercase;
+}
+
+.clip-analysis-notes {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin-bottom: 10px;
+  padding-left: 24px;
+  border-left: 2px solid var(--border);
+}
+
+.clip-analysis-block {
+  margin-top: 10px;
+}
+.clip-analysis-block h4 {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  font-weight: normal;
+  margin-bottom: 4px;
+}

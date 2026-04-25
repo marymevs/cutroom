@@ -118,31 +118,41 @@ func stripJSONFence(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// AnalyzeTranscript reviews the full transcript and returns editorial suggestions.
-func (c *AnthropicClient) AnalyzeTranscript(ctx context.Context, proj *domain.Project, transcript string) (*domain.Analysis, error) {
+// AnalyzeClip reviews a SINGLE clip's transcript with full model attention.
+// Replaces the old multi-clip-blob approach where one prompt covered every
+// clip — there, attention was split across N sections and subtle issues in
+// less-eventful clips got lost. Per-clip calls give every clip the same
+// thorough review.
+//
+// The system prompt is cacheable across clips (and across runs of the same
+// project), so prompt caching makes this nearly free on the input side.
+// Only the per-clip transcript pays full token cost.
+func (c *AnthropicClient) AnalyzeClip(ctx context.Context, clip *domain.Clip, transcript string) (*domain.ClipAnalysis, error) {
 	system := []contentBlock{{
 		Type: "text",
-		Text: `You are an expert YouTube video editor and producer. You will be given a timestamped transcript from one or more video clips. Your job is to:
-1. Identify sections to cut: filler words (um, uh, like), repeated content, pacing lags (long pauses, rambling), awkward stumbles.
-2. Identify 1-3 moments that would make great Reels/Shorts (compelling hooks, punchy statements, peak energy moments).
-3. Suggest 5 YouTube title options that are compelling and SEO-friendly.
-4. Write a 2-3 sentence YouTube description.
+		Text: `You are an expert YouTube video editor reviewing a SINGLE video clip from a creator's footage. You have your full attention on just this clip — be thorough and specific.
+
+Your job:
+1. Identify sections to CUT: filler words (um, uh, like), repeated content, pacing lags (long pauses, rambling), awkward stumbles. Don't filter for project-level relevance — surface everything notable.
+2. Identify reel/short candidates: 1-3 standout moments from THIS clip that could be a 30-60s Short (compelling hooks, punchy statements, peak energy). The project-level synthesis pass will pick the strongest candidates across all clips later — your job is to surface options.
+3. Write a brief 1-2 sentence editorial note: what's good about this clip, what's weak, what's its likely role in the final video.
+
+Be specific. Cite content from the transcript when explaining cuts. Use the timestamps from the transcript verbatim.
 
 Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. Schema:
 {
+  "notes": "string",
   "suggested_cuts": [
-    { "clip_name": "string", "start": 0.0, "end": 0.0, "reason": "string" }
+    { "start": 0.0, "end": 0.0, "reason": "string" }
   ],
-  "reel_moments": [
-    { "clip_name": "string", "start": 0.0, "end": 0.0, "hook": "string" }
-  ],
-  "suggested_titles": ["title1", "title2", "title3", "title4", "title5"],
-  "description": "string"
+  "reel_candidates": [
+    { "start": 0.0, "end": 0.0, "hook": "string" }
+  ]
 }`,
 		CacheControl: &cacheControl{Type: "ephemeral"},
 	}}
 
-	user := fmt.Sprintf("Project: %s\n\nTranscript:\n%s", proj.Name, transcript)
+	user := fmt.Sprintf("Clip: %s\nDuration: %.1fs\n\nTranscript:\n%s", clip.Name, clip.Duration, transcript)
 
 	raw, err := c.complete(ctx, anthropicRequest{
 		Model:     modelID,
@@ -155,55 +165,126 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 	}
 
 	var result struct {
+		Notes         string `json:"notes"`
 		SuggestedCuts []struct {
-			ClipName string  `json:"clip_name"`
-			Start    float64 `json:"start"`
-			End      float64 `json:"end"`
-			Reason   string  `json:"reason"`
+			Start  float64 `json:"start"`
+			End    float64 `json:"end"`
+			Reason string  `json:"reason"`
 		} `json:"suggested_cuts"`
-		ReelMoments []struct {
-			ClipName string  `json:"clip_name"`
-			Start    float64 `json:"start"`
-			End      float64 `json:"end"`
-			Hook     string  `json:"hook"`
-		} `json:"reel_moments"`
-		SuggestedTitles []string `json:"suggested_titles"`
-		Description     string   `json:"description"`
+		ReelCandidates []struct {
+			Start float64 `json:"start"`
+			End   float64 `json:"end"`
+			Hook  string  `json:"hook"`
+		} `json:"reel_candidates"`
 	}
 
 	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &result); err != nil {
-		return nil, fmt.Errorf("parse analysis JSON: %w\nraw: %s", err, raw)
+		return nil, fmt.Errorf("parse clip analysis JSON for %s: %w\nraw: %s", clip.Name, err, raw)
 	}
 
-	nameToID := make(map[string]string)
-	for _, c := range proj.Clips {
-		nameToID[c.Name] = c.ID
+	ca := &domain.ClipAnalysis{
+		ClipID:   clip.ID,
+		ClipName: clip.Name,
+		Notes:    result.Notes,
 	}
-
-	analysis := &domain.Analysis{
-		SuggestedTitles: result.SuggestedTitles,
-		Description:     result.Description,
-		RawTranscript:   transcript,
-	}
-
 	for _, sc := range result.SuggestedCuts {
-		analysis.SuggestedCuts = append(analysis.SuggestedCuts, domain.SuggestedCut{
-			ClipID: nameToID[sc.ClipName],
+		ca.SuggestedCuts = append(ca.SuggestedCuts, domain.SuggestedCut{
+			ClipID: clip.ID,
 			Start:  sc.Start,
 			End:    sc.End,
 			Reason: sc.Reason,
 		})
 	}
+	for _, rc := range result.ReelCandidates {
+		ca.ReelCandidates = append(ca.ReelCandidates, domain.ReelMoment{
+			ClipID: clip.ID,
+			Start:  rc.Start,
+			End:    rc.End,
+			Hook:   rc.Hook,
+		})
+	}
+	return ca, nil
+}
+
+// SynthesizeProject takes per-clip analyses and produces project-level
+// outputs: 5 title suggestions, a YouTube description, and 1-3 best reel
+// picks chosen from across all clips' reel candidates. Cheap call — input
+// is just per-clip notes/candidates, no full transcripts.
+func (c *AnthropicClient) SynthesizeProject(ctx context.Context, proj *domain.Project, perClip []*domain.ClipAnalysis) (titles []string, description string, topReels []domain.ReelMoment, err error) {
+	system := []contentBlock{{
+		Type: "text",
+		Text: `You are synthesizing a YouTube video from per-clip editorial analyses. The creator already analyzed each clip individually; your job is to produce project-level outputs by reading across the per-clip notes and reel candidates.
+
+Pick:
+1. 5 compelling, SEO-friendly title options for the overall video.
+2. A 2-3 sentence YouTube description.
+3. 1-3 reel moments chosen from across the per-clip reel candidates — pick the strongest, most distinct moments. Use the clip_name field from the input to identify which clip a moment came from. Don't invent new moments outside the candidate list.
+
+Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. Schema:
+{
+  "suggested_titles": ["t1", "t2", "t3", "t4", "t5"],
+  "description": "string",
+  "reel_moments": [
+    { "clip_name": "string", "start": 0.0, "end": 0.0, "hook": "string" }
+  ]
+}`,
+		CacheControl: &cacheControl{Type: "ephemeral"},
+	}}
+
+	// Build a compact per-clip summary the model can read across.
+	var b strings.Builder
+	fmt.Fprintf(&b, "Project: %s\n\n", proj.Name)
+	for _, ca := range perClip {
+		fmt.Fprintf(&b, "[CLIP: %s]\n", ca.ClipName)
+		if ca.Notes != "" {
+			fmt.Fprintf(&b, "Notes: %s\n", ca.Notes)
+		}
+		if len(ca.ReelCandidates) > 0 {
+			b.WriteString("Reel candidates:\n")
+			for _, rc := range ca.ReelCandidates {
+				fmt.Fprintf(&b, "  [%.2f-%.2f] %s\n", rc.Start, rc.End, rc.Hook)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	raw, err := c.complete(ctx, anthropicRequest{
+		Model:     modelID,
+		MaxTokens: 2048,
+		System:    system,
+		Messages:  []message{{Role: "user", Content: b.String()}},
+	})
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	var result struct {
+		SuggestedTitles []string `json:"suggested_titles"`
+		Description     string   `json:"description"`
+		ReelMoments     []struct {
+			ClipName string  `json:"clip_name"`
+			Start    float64 `json:"start"`
+			End      float64 `json:"end"`
+			Hook     string  `json:"hook"`
+		} `json:"reel_moments"`
+	}
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &result); err != nil {
+		return nil, "", nil, fmt.Errorf("parse synthesis JSON: %w\nraw: %s", err, raw)
+	}
+
+	nameToID := make(map[string]string, len(proj.Clips))
+	for _, cl := range proj.Clips {
+		nameToID[cl.Name] = cl.ID
+	}
 	for _, rm := range result.ReelMoments {
-		analysis.ReelMoments = append(analysis.ReelMoments, domain.ReelMoment{
+		topReels = append(topReels, domain.ReelMoment{
 			ClipID: nameToID[rm.ClipName],
 			Start:  rm.Start,
 			End:    rm.End,
 			Hook:   rm.Hook,
 		})
 	}
-
-	return analysis, nil
+	return result.SuggestedTitles, result.Description, topReels, nil
 }
 
 // BuildManifest takes user instructions + analysis + the user's title card
