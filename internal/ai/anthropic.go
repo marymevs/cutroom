@@ -12,19 +12,56 @@ import (
 	"github.com/mary/cutroom/internal/domain"
 )
 
+// modelID is the Claude model used for both transcript analysis and manifest
+// generation. Sonnet 4.6 with extended thinking + prompt caching is the
+// quality bar v2 calibrates against.
+const modelID = "claude-sonnet-4-6"
+
+// thinkingBudget is the per-request thinking-token budget for BuildManifest.
+// AnalyzeTranscript runs without thinking; manifest generation needs the
+// reasoning headroom on long transcripts.
+const thinkingBudget = 8000
+
+// AnthropicClient is the HTTP client for the Anthropic Messages API.
+// apiURL is configurable so tests can point it at an httptest.Server.
 type AnthropicClient struct {
 	apiKey string
+	apiURL string
+	http   *http.Client
 }
 
 func NewAnthropicClient(apiKey string) *AnthropicClient {
-	return &AnthropicClient{apiKey: apiKey}
+	return &AnthropicClient{
+		apiKey: apiKey,
+		apiURL: "https://api.anthropic.com/v1/messages",
+		http:   http.DefaultClient,
+	}
+}
+
+// contentBlock is a single block in the Messages API system or response
+// content. cache_control on a block marks it as cacheable across requests.
+type contentBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	Thinking     string        `json:"thinking,omitempty"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+type cacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type thinkingConfig struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicRequest struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system"`
-	Messages  []message `json:"messages"`
+	Model     string          `json:"model"`
+	MaxTokens int             `json:"max_tokens"`
+	System    []contentBlock  `json:"system,omitempty"`
+	Messages  []message       `json:"messages"`
+	Thinking  *thinkingConfig `json:"thinking,omitempty"`
 }
 
 type message struct {
@@ -33,23 +70,14 @@ type message struct {
 }
 
 type anthropicResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
+	Content []contentBlock `json:"content"`
 }
 
-func (c *AnthropicClient) complete(ctx context.Context, system, user string) (string, error) {
-	req := anthropicRequest{
-		Model:     "claude-sonnet-4-20250514",
-		MaxTokens: 4096,
-		System:    system,
-		Messages:  []message{{Role: "user", Content: user}},
-	}
-
+// complete sends a request to the Messages API and returns the first text
+// block from the response. Thinking blocks (when present) are skipped.
+func (c *AnthropicClient) complete(ctx context.Context, req anthropicRequest) (string, error) {
 	b, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(b))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(b))
 	if err != nil {
 		return "", err
 	}
@@ -57,30 +85,44 @@ func (c *AnthropicClient) complete(ctx context.Context, system, user string) (st
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("content-type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("anthropic request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(b))
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(body))
 	}
 
 	var ar anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
 		return "", err
 	}
-	if len(ar.Content) == 0 {
-		return "", fmt.Errorf("empty response")
+	for _, block := range ar.Content {
+		if block.Type == "text" {
+			return block.Text, nil
+		}
 	}
-	return ar.Content[0].Text, nil
+	return "", fmt.Errorf("no text block in response")
+}
+
+// stripJSONFence removes any accidental ```json ... ``` markdown fence so the
+// raw response can be unmarshaled.
+func stripJSONFence(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
 }
 
 // AnalyzeTranscript reviews the full transcript and returns editorial suggestions.
 func (c *AnthropicClient) AnalyzeTranscript(ctx context.Context, proj *domain.Project, transcript string) (*domain.Analysis, error) {
-	system := `You are an expert YouTube video editor and producer. You will be given a timestamped transcript from one or more video clips. Your job is to:
+	system := []contentBlock{{
+		Type: "text",
+		Text: `You are an expert YouTube video editor and producer. You will be given a timestamped transcript from one or more video clips. Your job is to:
 1. Identify sections to cut: filler words (um, uh, like), repeated content, pacing lags (long pauses, rambling), awkward stumbles.
 2. Identify 1-3 moments that would make great Reels/Shorts (compelling hooks, punchy statements, peak energy moments).
 3. Suggest 5 YouTube title options that are compelling and SEO-friendly.
@@ -96,20 +138,21 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
   ],
   "suggested_titles": ["title1", "title2", "title3", "title4", "title5"],
   "description": "string"
-}`
+}`,
+		CacheControl: &cacheControl{Type: "ephemeral"},
+	}}
 
 	user := fmt.Sprintf("Project: %s\n\nTranscript:\n%s", proj.Name, transcript)
 
-	raw, err := c.complete(ctx, system, user)
+	raw, err := c.complete(ctx, anthropicRequest{
+		Model:     modelID,
+		MaxTokens: 4096,
+		System:    system,
+		Messages:  []message{{Role: "user", Content: user}},
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Strip any accidental markdown fences
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	raw = strings.TrimSpace(raw)
 
 	var result struct {
 		SuggestedCuts []struct {
@@ -128,11 +171,10 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 		Description     string   `json:"description"`
 	}
 
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &result); err != nil {
 		return nil, fmt.Errorf("parse analysis JSON: %w\nraw: %s", err, raw)
 	}
 
-	// Map clip names back to clip IDs
 	nameToID := make(map[string]string)
 	for _, c := range proj.Clips {
 		nameToID[c.Name] = c.ID
@@ -164,9 +206,11 @@ Respond ONLY with a valid JSON object. No preamble, no markdown, no backticks. S
 	return analysis, nil
 }
 
-// BuildManifest takes user instructions + analysis and builds a complete EditManifest.
+// BuildManifest takes user instructions + analysis and builds a complete
+// EditManifest. Runs with extended thinking enabled because the manifest
+// generation is the highest-stakes call in the pipeline — wrong cuts mean
+// a wrong video.
 func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Project, instructions string) (*domain.EditManifest, error) {
-	// Summarize what we know about the project for context
 	var clipsInfo strings.Builder
 	for _, clip := range proj.Clips {
 		clipsInfo.WriteString(fmt.Sprintf("- Clip: %s (ID: %s, Duration: %.1fs)\n", clip.Name, clip.ID, clip.Duration))
@@ -178,7 +222,9 @@ func (c *AnthropicClient) BuildManifest(ctx context.Context, proj *domain.Projec
 		analysisInfo = fmt.Sprintf("Suggested cuts from transcript analysis:\n%s", string(analysisJSON))
 	}
 
-	system := `You are a YouTube video editor. You will receive a list of clips, editorial analysis, and freeform editing instructions. Produce a structured edit manifest.
+	system := []contentBlock{{
+		Type: "text",
+		Text: `You are a YouTube video editor. You will receive a list of clips, editorial analysis, and freeform editing instructions. Produce a structured edit manifest.
 
 Respond ONLY with valid JSON. No preamble, no markdown. Schema:
 {
@@ -200,7 +246,9 @@ Rules:
 - output_cuts are confirmed removals (can include suggested cuts from analysis)
 - reel_segment is the best 30-60s moment for a Short/Reel
 - style options: "default" (white text, black bg), "minimal" (small caps), "bold" (large centered)
-- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`
+- description: one short plain-English sentence (≤12 words) describing what happens in that segment or why the cut is being made. The user reads these to sanity-check the plan before rendering, so be concrete about on-screen action, not vague ("intro clip").`,
+		CacheControl: &cacheControl{Type: "ephemeral"},
+	}}
 
 	user := fmt.Sprintf(`Clips:
 %s
@@ -210,15 +258,19 @@ Rules:
 Editor instructions:
 %s`, clipsInfo.String(), analysisInfo, instructions)
 
-	raw, err := c.complete(ctx, system, user)
+	raw, err := c.complete(ctx, anthropicRequest{
+		Model:     modelID,
+		MaxTokens: 16384,
+		System:    system,
+		Messages:  []message{{Role: "user", Content: user}},
+		Thinking: &thinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: thinkingBudget,
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	raw = strings.TrimSpace(raw)
 
 	var result struct {
 		Segments []struct {
@@ -247,7 +299,7 @@ Editor instructions:
 		} `json:"reel_segment"`
 	}
 
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &result); err != nil {
 		return nil, fmt.Errorf("parse manifest JSON: %w\nraw: %s", err, raw)
 	}
 
