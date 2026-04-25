@@ -109,52 +109,98 @@ func (p *Pipeline) ensureClipsLocal(ctx context.Context, proj *domain.Project) e
 	return nil
 }
 
-// Analyze downloads clips, probes duration, transcribes, and runs AI editorial review.
+// Analyze downloads clips, probes duration, transcribes, and runs AI
+// editorial review in two passes:
+//
+//  1. Per-clip pass: each clip is analyzed independently with the model's
+//     full attention on that clip's transcript only. Surfaces all the cuts
+//     and reel candidates inside that clip without dilution from other
+//     clips' content.
+//  2. Synthesis pass: a single project-level call reads the per-clip
+//     summaries and picks the project's title options, description, and
+//     1-3 top reel moments from across all clips' candidates.
+//
+// Cost: N+1 Anthropic calls instead of 1, but the system prompts cache and
+// each per-clip call's user message is a fraction of the old multi-clip
+// blob. Latency may not change much because the calls are smaller. The
+// upside — every clip gets thoroughly analyzed — is the reason for the
+// rewrite.
 func (p *Pipeline) Analyze(proj *domain.Project) error {
 	ctx := context.Background()
 
+	perClip := make([]*domain.ClipAnalysis, 0, len(proj.Clips))
 	var fullTranscript strings.Builder
+
 	for i := range proj.Clips {
 		clip := &proj.Clips[i]
 
-		// Download clip from GCS to local workdir
+		// Download, probe, transcribe (per-clip Whisper + ffprobe).
 		localPath := p.localClipPath(proj.ID, clip)
 		os.MkdirAll(filepath.Dir(localPath), 0755)
-
 		if err := p.gcs.Download(ctx, clip.GCSPath, localPath); err != nil {
 			return fmt.Errorf("download clip %s: %w", clip.Name, err)
 		}
-
-		// Probe duration via ffprobe
 		duration, err := probeDuration(localPath)
 		if err != nil {
 			return fmt.Errorf("probe %s: %w", clip.Name, err)
 		}
 		clip.Duration = duration
-
-		// Transcribe with Whisper
 		segments, err := p.transcriber.Transcribe(ctx, localPath)
 		if err != nil {
 			return fmt.Errorf("transcribe %s: %w", clip.Name, err)
 		}
 		clip.Transcript = segments
 
-		// Accumulate full transcript for AI analysis
-		fullTranscript.WriteString(fmt.Sprintf("\n\n[CLIP: %s]\n", clip.Name))
-		for _, seg := range segments {
-			fullTranscript.WriteString(fmt.Sprintf("[%.2f-%.2f] %s\n", seg.Start, seg.End, seg.Text))
+		// Per-clip transcript text (timestamped). Used both for the
+		// per-clip AI call AND accumulated for Analysis.RawTranscript.
+		clipText := formatClipTranscript(clip.Name, segments)
+		fullTranscript.WriteString(clipText)
+
+		// Per-clip AI pass: full attention on just this clip.
+		ca, err := p.ai.AnalyzeClip(ctx, clip, clipText)
+		if err != nil {
+			return fmt.Errorf("AI clip analysis for %s: %w", clip.Name, err)
 		}
+		perClip = append(perClip, ca)
 	}
 
-	// AI editorial analysis
-	analysis, err := p.ai.AnalyzeTranscript(ctx, proj, fullTranscript.String())
+	// Synthesis pass: project-level titles, description, top reel picks.
+	titles, description, topReels, err := p.ai.SynthesizeProject(ctx, proj, perClip)
 	if err != nil {
-		return fmt.Errorf("AI analysis: %w", err)
+		return fmt.Errorf("AI synthesis: %w", err)
 	}
 
-	proj.Analysis = analysis
+	// Roll-up: flatten per-clip cuts into Analysis.SuggestedCuts so the
+	// existing manifest UI (and any downstream consumer that reads
+	// SuggestedCuts) keeps working without touching every call site.
+	var allCuts []domain.SuggestedCut
+	for _, ca := range perClip {
+		allCuts = append(allCuts, ca.SuggestedCuts...)
+	}
+
+	proj.Analysis = &domain.Analysis{
+		ClipAnalyses:    perClip,
+		SuggestedCuts:   allCuts,
+		ReelMoments:     topReels,
+		SuggestedTitles: titles,
+		Description:     description,
+		RawTranscript:   fullTranscript.String(),
+	}
 	proj.Status = domain.StatusAnalyzed
 	return nil
+}
+
+// formatClipTranscript returns a `[CLIP: name]\n[start-end] text\n...`
+// block for one clip. Same shape as the old multi-clip accumulator so
+// downstream consumers (and the eye reading the raw transcript) see a
+// familiar layout.
+func formatClipTranscript(clipName string, segs []domain.TranscriptSegment) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\n[CLIP: %s]\n", clipName)
+	for _, seg := range segs {
+		fmt.Fprintf(&b, "[%.2f-%.2f] %s\n", seg.Start, seg.End, seg.Text)
+	}
+	return b.String()
 }
 
 // BuildManifest combines user free-text instructions + analysis + the

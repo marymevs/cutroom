@@ -3,14 +3,51 @@
 <section class="analysis-panel">
   <div class="step-label">Analysis Complete</div>
 
-  {{if .Analysis.SuggestedCuts}}
+  {{if .Analysis.ClipAnalyses}}
   <div class="analysis-section">
-    <h3>Suggested Cuts <span class="count">{{len .Analysis.SuggestedCuts}}</span></h3>
-    <div class="cuts-list">
-      {{range .Analysis.SuggestedCuts}}
-      <div class="cut-row">
-        <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
-        <span class="cut-reason">{{.Reason}}</span>
+    <h3>Per-Clip Review</h3>
+    <p class="analysis-hint">Each clip was analyzed individually with full attention — surfacing every cut and reel candidate within that clip.</p>
+    <div class="clip-analysis-list">
+      {{range .Analysis.ClipAnalyses}}
+      <div class="clip-analysis-card">
+        <div class="clip-analysis-header">
+          <span class="clip-analysis-icon">🎬</span>
+          <span class="clip-analysis-name">{{.ClipName}}</span>
+          <span class="clip-analysis-badges">
+            {{if .SuggestedCuts}}<span class="badge-count">{{len .SuggestedCuts}} cuts</span>{{end}}
+            {{if .ReelCandidates}}<span class="badge-count">{{len .ReelCandidates}} reel candidate{{if gt (len .ReelCandidates) 1}}s{{end}}</span>{{end}}
+          </span>
+        </div>
+
+        {{if .Notes}}
+        <p class="clip-analysis-notes">{{.Notes}}</p>
+        {{end}}
+
+        {{if .SuggestedCuts}}
+        <div class="clip-analysis-block">
+          <h4>Suggested cuts</h4>
+          <div class="cuts-list">
+            {{range .SuggestedCuts}}
+            <div class="cut-row">
+              <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
+              <span class="cut-reason">{{.Reason}}</span>
+            </div>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+
+        {{if .ReelCandidates}}
+        <div class="clip-analysis-block">
+          <h4>Reel candidates from this clip</h4>
+          {{range .ReelCandidates}}
+          <div class="reel-row">
+            <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
+            <span class="reel-hook">{{.Hook}}</span>
+          </div>
+          {{end}}
+        </div>
+        {{end}}
       </div>
       {{end}}
     </div>
@@ -19,9 +56,11 @@
 
   {{if .Analysis.ReelMoments}}
   <div class="analysis-section">
-    <h3>Reel Moments <span class="count">{{len .Analysis.ReelMoments}}</span></h3>
+    <h3>Top Reel Picks <span class="count">{{len .Analysis.ReelMoments}}</span></h3>
+    <p class="analysis-hint">The strongest moments across all clips, chosen by the synthesis pass.</p>
     {{range .Analysis.ReelMoments}}
     <div class="reel-row">
+      <span class="clip-tag">{{clipName $.Clips .ClipID}}</span>
       <span class="cut-time">{{printf "%.1f" .Start}}s → {{printf "%.1f" .End}}s</span>
       <span class="reel-hook">{{.Hook}}</span>
     </div>
@@ -35,6 +74,13 @@
     {{range .Analysis.SuggestedTitles}}
     <div class="title-option">{{.}}</div>
     {{end}}
+  </div>
+  {{end}}
+
+  {{if .Analysis.Description}}
+  <div class="analysis-section">
+    <h3>Description</h3>
+    <p class="description-text">{{.Analysis.Description}}</p>
   </div>
   {{end}}
 </section>

@@ -76,12 +76,32 @@ type TranscriptSegment struct {
 }
 
 // Analysis is the AI editorial review of all clips.
+//
+// As of the per-clip analysis change: ClipAnalyses is the structured,
+// per-clip detail (each clip got its own Anthropic call with full
+// attention). SuggestedCuts and ReelMoments are derived for backward
+// compatibility — SuggestedCuts is the flat union of every clip's cuts,
+// and ReelMoments is the project-level top picks chosen by the synthesis
+// pass from across all clips' reel candidates.
 type Analysis struct {
+	ClipAnalyses    []*ClipAnalysis
 	SuggestedCuts   []SuggestedCut
 	SuggestedTitles []string
 	Description     string
 	ReelMoments     []ReelMoment
 	RawTranscript   string
+}
+
+// ClipAnalysis is the per-clip output of the editorial review pass. Each
+// clip gets its own Anthropic call with the clip's transcript only, so
+// the model's full attention is on just that clip — no dilution from a
+// concatenated multi-clip blob.
+type ClipAnalysis struct {
+	ClipID         string
+	ClipName       string
+	Notes          string         // 1-2 sentence editorial summary of this clip
+	SuggestedCuts  []SuggestedCut // cuts within THIS clip
+	ReelCandidates []ReelMoment   // reel-worthy moments in THIS clip (synthesis picks the best across clips)
 }
 
 // SuggestedCut is a section Claude recommends removing.

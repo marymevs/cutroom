@@ -40,43 +40,105 @@ func captureRequest(t *testing.T, captured *anthropicRequest, responseText strin
 	}
 }
 
-func TestAnalyzeTranscript_GoldenOutput(t *testing.T) {
+func TestAnalyzeClip_PerClipShape(t *testing.T) {
 	canned := `{
+		"notes": "Strong intro with one filler stumble.",
 		"suggested_cuts": [
-			{"clip_name": "intro.mp4", "start": 1.5, "end": 2.0, "reason": "filler word 'um'"}
+			{"start": 1.5, "end": 2.0, "reason": "filler word 'um'"}
 		],
+		"reel_candidates": [
+			{"start": 5.0, "end": 35.0, "hook": "punchy opening line"}
+		]
+	}`
+	var got anthropicRequest
+	c, _ := newTestClient(t, captureRequest(t, &got, canned))
+
+	clip := &domain.Clip{ID: "clip-1", Name: "intro.mp4", Duration: 60.0}
+	ca, err := c.AnalyzeClip(context.Background(), clip, "[0.0-2.0] Hello, um, world.")
+	if err != nil {
+		t.Fatalf("AnalyzeClip: %v", err)
+	}
+
+	if ca.ClipID != "clip-1" || ca.ClipName != "intro.mp4" {
+		t.Errorf("clip identity mismatch: %+v", ca)
+	}
+	if ca.Notes != "Strong intro with one filler stumble." {
+		t.Errorf("notes mismatch: %q", ca.Notes)
+	}
+	if len(ca.SuggestedCuts) != 1 || ca.SuggestedCuts[0].ClipID != "clip-1" {
+		t.Errorf("expected one cut stamped with clip-1, got %+v", ca.SuggestedCuts)
+	}
+	if ca.SuggestedCuts[0].Reason != "filler word 'um'" {
+		t.Errorf("reason: %q", ca.SuggestedCuts[0].Reason)
+	}
+	if len(ca.ReelCandidates) != 1 || ca.ReelCandidates[0].ClipID != "clip-1" {
+		t.Errorf("expected reel candidate stamped with clip-1, got %+v", ca.ReelCandidates)
+	}
+
+	// Per-clip system prompt must be cacheable so N clips don't pay N×
+	// input cost on the system block.
+	if len(got.System) != 1 || got.System[0].CacheControl == nil ||
+		got.System[0].CacheControl.Type != "ephemeral" {
+		t.Errorf("expected cache_control: ephemeral on system block, got %+v", got.System)
+	}
+	// The user message should reference the clip name + duration so the
+	// model knows what it's looking at without pulling that from the
+	// system prompt (which is cached and clip-agnostic).
+	user := got.Messages[0].Content
+	if !strings.Contains(user, "intro.mp4") || !strings.Contains(user, "60.0s") {
+		t.Errorf("user message missing clip identity: %q", user)
+	}
+}
+
+func TestSynthesizeProject_PicksAcrossClips(t *testing.T) {
+	canned := `{
+		"suggested_titles": ["A", "B", "C", "D", "E"],
+		"description": "Short and punchy.",
 		"reel_moments": [
-			{"clip_name": "intro.mp4", "start": 5.0, "end": 35.0, "hook": "punchy opening line"}
-		],
-		"suggested_titles": ["Title A", "Title B", "Title C", "Title D", "Title E"],
-		"description": "A short test description."
+			{"clip_name": "intro.mp4", "start": 5.0, "end": 35.0, "hook": "the hook"},
+			{"clip_name": "outro.mp4", "start": 100.0, "end": 130.0, "hook": "second hook"}
+		]
 	}`
 	var got anthropicRequest
 	c, _ := newTestClient(t, captureRequest(t, &got, canned))
 
 	proj := &domain.Project{
-		Name: "Test Project",
-		Clips: []domain.Clip{{ID: "clip-1", Name: "intro.mp4"}},
+		Name: "Test",
+		Clips: []domain.Clip{
+			{ID: "c1", Name: "intro.mp4"},
+			{ID: "c2", Name: "outro.mp4"},
+		},
 	}
-	analysis, err := c.AnalyzeTranscript(context.Background(), proj, "[0.0-2.0] Hello, um, world.")
-	if err != nil {
-		t.Fatalf("AnalyzeTranscript: %v", err)
+	perClip := []*domain.ClipAnalysis{
+		{ClipID: "c1", ClipName: "intro.mp4", Notes: "intro vibe", ReelCandidates: []domain.ReelMoment{{ClipID: "c1", Start: 5, End: 35, Hook: "the hook"}}},
+		{ClipID: "c2", ClipName: "outro.mp4", Notes: "outro vibe", ReelCandidates: []domain.ReelMoment{{ClipID: "c2", Start: 100, End: 130, Hook: "second hook"}}},
 	}
 
-	if len(analysis.SuggestedCuts) != 1 || analysis.SuggestedCuts[0].ClipID != "clip-1" {
-		t.Errorf("expected one cut mapped to clip-1, got %+v", analysis.SuggestedCuts)
+	titles, description, topReels, err := c.SynthesizeProject(context.Background(), proj, perClip)
+	if err != nil {
+		t.Fatalf("SynthesizeProject: %v", err)
 	}
-	if analysis.SuggestedCuts[0].Reason != "filler word 'um'" {
-		t.Errorf("reason mismatch: %q", analysis.SuggestedCuts[0].Reason)
+	if len(titles) != 5 {
+		t.Errorf("expected 5 titles, got %d", len(titles))
 	}
-	if len(analysis.ReelMoments) != 1 || analysis.ReelMoments[0].ClipID != "clip-1" {
-		t.Errorf("expected reel mapped to clip-1, got %+v", analysis.ReelMoments)
+	if description != "Short and punchy." {
+		t.Errorf("description: %q", description)
 	}
-	if len(analysis.SuggestedTitles) != 5 {
-		t.Errorf("expected 5 titles, got %d", len(analysis.SuggestedTitles))
+	if len(topReels) != 2 {
+		t.Fatalf("expected 2 top reels, got %d", len(topReels))
 	}
-	if analysis.RawTranscript != "[0.0-2.0] Hello, um, world." {
-		t.Errorf("transcript not preserved: %q", analysis.RawTranscript)
+	// Reel moments must be re-mapped from clip_name back to clip_id.
+	if topReels[0].ClipID != "c1" || topReels[1].ClipID != "c2" {
+		t.Errorf("clip_name → clip_id mapping wrong: %+v", topReels)
+	}
+
+	// User message should compactly summarize per-clip notes + reel
+	// candidates — that's what the synthesis pass reads.
+	user := got.Messages[0].Content
+	for _, expect := range []string{"intro vibe", "outro vibe", "the hook", "second hook"} {
+		if !strings.Contains(user, expect) {
+			t.Errorf("user message missing %q", expect)
+		}
 	}
 }
 
@@ -205,14 +267,14 @@ func TestBuildManifest_RequestShape(t *testing.T) {
 	}
 }
 
-func TestAnalyzeTranscript_RequestShape(t *testing.T) {
-	canned := `{"suggested_cuts":[],"reel_moments":[],"suggested_titles":[],"description":""}`
+func TestAnalyzeClip_RequestShape(t *testing.T) {
+	canned := `{"notes":"","suggested_cuts":[],"reel_candidates":[]}`
 	var got anthropicRequest
 	c, _ := newTestClient(t, captureRequest(t, &got, canned))
 
-	_, err := c.AnalyzeTranscript(context.Background(), &domain.Project{Name: "P"}, "")
+	_, err := c.AnalyzeClip(context.Background(), &domain.Clip{ID: "x", Name: "x.mp4"}, "")
 	if err != nil {
-		t.Fatalf("AnalyzeTranscript: %v", err)
+		t.Fatalf("AnalyzeClip: %v", err)
 	}
 
 	if got.Model != modelID {
@@ -221,8 +283,10 @@ func TestAnalyzeTranscript_RequestShape(t *testing.T) {
 	if got.MaxTokens != 4096 {
 		t.Errorf("max_tokens mismatch: got %d want 4096", got.MaxTokens)
 	}
+	// Per-clip pass deliberately skips extended thinking — thinking is on
+	// BuildManifest where the stakes are higher and the cost is justified.
 	if got.Thinking != nil {
-		t.Errorf("expected no thinking field on AnalyzeTranscript, got %+v", got.Thinking)
+		t.Errorf("expected no thinking field on AnalyzeClip, got %+v", got.Thinking)
 	}
 	if len(got.System) != 1 || got.System[0].CacheControl == nil ||
 		got.System[0].CacheControl.Type != "ephemeral" {
@@ -272,7 +336,7 @@ func TestComplete_ErrorOnNon200(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"bad key"}`))
 	})
 
-	_, err := c.AnalyzeTranscript(context.Background(), &domain.Project{Name: "P"}, "x")
+	_, err := c.AnalyzeClip(context.Background(), &domain.Clip{ID: "x", Name: "x.mp4"}, "x")
 	if err == nil {
 		t.Fatal("expected error on 401, got nil")
 	}
