@@ -46,6 +46,15 @@ function uploadFiles(input, projectId, target) {
 async function uploadFilesArray(files, projectId, targetSelector) {
   const target = document.querySelector(targetSelector);
 
+  // If the existing list is just the empty-state placeholder ("No clips yet."),
+  // wipe it once before appending tiles so the first upload doesn't leave the
+  // empty-state visible above the in-progress tiles. Subsequent batches skip
+  // this — by then the list contains real clips.
+  if (target) {
+    const empty = target.querySelector('.empty-state');
+    if (empty) empty.remove();
+  }
+
   // One aggregator per upload batch — the single source of truth for this
   // batch's progress. Per-tile renders are derived from it.
   const aggregator = new UploadAggregator();
@@ -66,7 +75,19 @@ async function uploadFilesArray(files, projectId, targetSelector) {
 
   const ids = files.map((file) => aggregator.addFile(file.name, file.size));
 
-  const results = await Promise.all(
+  // Per-tile flow: each uploadOne transforms its OWN tile when it finishes.
+  // We deliberately do NOT replace target.innerHTML at end-of-batch.
+  //
+  // Why: a previous version did `target.innerHTML = lastResult.html` after
+  // Promise.all to swap in the server-rendered clip list. That works for a
+  // single batch — but if the user drops/picks more clips while the first
+  // batch is still running, batch-1's Promise.all eventually resolves and
+  // wipes #clips-list, including the tiles batch-2 is actively progressing.
+  // xhr.upload.onprogress keeps firing for those orphaned tiles but they're
+  // gone from the DOM, so progress visibly freezes. When batch-2 finishes,
+  // ITS innerHTML swap fires and the clip pops in as "uploaded" — exactly
+  // the user-visible bug.
+  await Promise.all(
     files.map((file, i) =>
       uploadOne(file, projectId, tiles[i], aggregator, ids[i], startedAt).catch((err) => {
         console.error('Upload failed', file.name, err);
@@ -79,12 +100,19 @@ async function uploadFilesArray(files, projectId, targetSelector) {
       })
     )
   );
+}
 
-  if (results.some(Boolean) && target) {
-    const last = results.filter(Boolean).pop();
-    target.innerHTML = last.html;
-    if (window.htmx) htmx.process(target);
-  }
+// markTileUploaded transforms an in-place "uploading" tile to match the
+// server's "uploaded" rendering (clips_partial.html). Called from uploadOne
+// the moment a single clip's register response comes back, independent of
+// any other upload in flight.
+function markTileUploaded(tile, fileName) {
+  if (!tile) return;
+  tile.className = 'clip-item';
+  tile.innerHTML =
+    `<span class="clip-icon">🎬</span>` +
+    `<span class="clip-name">${escapeHtml(fileName)}</span>` +
+    `<span class="clip-status">uploaded</span>`;
 }
 
 async function uploadOne(file, projectId, tile, aggregator, fileId, startedAt) {
@@ -110,11 +138,14 @@ async function uploadOne(file, projectId, tile, aggregator, fileId, startedAt) {
     body: JSON.stringify({ filename: file.name, objectName }),
   });
   if (!regResp.ok) throw new Error(`register ${regResp.status}: ${await regResp.text()}`);
+  // Drain the body so the response can be released; we don't use the
+  // server-rendered HTML anymore (transform tile in place instead).
+  await regResp.text();
 
   aggregator.setStatus(fileId, 'done');
-  renderTile(tile, aggregator.fileStats(fileId), startedAt);
+  markTileUploaded(tile, file.name);
 
-  return { html: await regResp.text() };
+  return { ok: true };
 }
 
 // Initiate the resumable session. The signed URL was minted for POST with an
