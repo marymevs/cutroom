@@ -52,13 +52,19 @@ func NewCardsHandler(store cardStorage, uploader cardUploader, pages, partials *
 // ─── routes ──────────────────────────────────────────────────────────────
 
 // CardsPage renders the full /cards library page.
+//
+// The page template (cards.html) defines the "content" block; layout.html
+// wraps it with the site shell. ExecuteTemplate must target "layout.html"
+// — calling it with "cards.html" silently writes an empty body because no
+// top-level template by that name exists in the parsed set. (See
+// Handler.Index and Handler.GetProject for the same pattern.)
 func (h *CardsHandler) CardsPage(w http.ResponseWriter, r *http.Request) {
 	list, err := h.listWithThumbs(r.Context())
 	if err != nil {
 		http.Error(w, "list cards: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := h.pages.ExecuteTemplate(w, "cards.html", struct {
+	if err := h.pages.ExecuteTemplate(w, "layout.html", struct {
 		Cards []*domain.Card
 	}{Cards: list}); err != nil {
 		// Templates handle their own logging; never leak a half-written response.
