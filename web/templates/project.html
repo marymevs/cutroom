@@ -5,6 +5,7 @@
     <a href="/" class="back">← Projects</a>
     <h2>{{.Name}}</h2>
     <span class="badge status-{{.Status}}">{{.Status}}</span>
+    <a href="/cards" class="header-link">Card Library →</a>
   </div>
   {{if and (eq .Status "error") .Error}}
   <div class="error-detail status-error">

@@ -1,5 +1,29 @@
 package domain
 
+import "time"
+
+// Card is an uploaded title-card asset (typically a Canva-designed PNG).
+// Cards live in a per-user library at /cards and (in PR-5) are referenced
+// from EditManifest.TitleCards via ImageID.
+//
+// GCSPath is the original full-res PNG; ThumbGCSPath is a 320x180 thumbnail
+// generated server-side at upload time so the library grid doesn't load
+// 30x10MB originals on every page view.
+//
+// ThumbURL is a freshly-signed read URL populated by the handler before
+// rendering; it is NOT persisted (firestore:"-").
+type Card struct {
+	ID           string
+	Name         string
+	Description  string
+	GCSPath      string
+	ThumbGCSPath string
+	Width        int
+	Height       int
+	CreatedAt    time.Time
+	ThumbURL     string `firestore:"-"`
+}
+
 // Status values for a project
 type Status string
 
