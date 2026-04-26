@@ -17,7 +17,27 @@
         <span class="plan-clip-icon">🎬</span>
         <span class="plan-clip-name">{{$clip.Name}}</span>
         {{if $clip.Duration}}<span class="plan-clip-duration">{{printf "%.1f" $clip.Duration}}s</span>{{end}}
+        <button type="button" class="plan-clip-video-toggle"
+                onclick="toggleClipVideo(this)"
+                aria-expanded="false"
+                aria-controls="video-{{$clip.ID}}">
+          ▶ Show video
+        </button>
       </div>
+
+      {{/* preload="metadata" — don't download bytes until the user
+           opens the video AND/OR a row's Jump button forces play.
+           Hidden by default so a 5-clip project doesn't render five
+           giant <video> elements stacked. */}}
+      {{if $clip.GCSURL}}
+      <video class="plan-clip-video"
+             id="video-{{$clip.ID}}"
+             src="{{$clip.GCSURL}}"
+             preload="metadata"
+             controls
+             playsinline
+             hidden></video>
+      {{end}}
 
       {{/* Segments from this clip — playback order across the whole project
            is preserved via the seg's index in $.Manifest.Segments, shown
@@ -34,6 +54,10 @@
             <span class="row-order" title="position in final video">{{add1 $i}}</span>
             <div class="row-main">
               <div class="row-meta">
+                <button type="button" class="row-jump"
+                        onclick="jumpTo(this)"
+                        title="Play this clip from the start time"
+                        aria-label="Play this clip from the segment start">▶</button>
                 <span class="time-range">
                   <input type="number" step="0.1" min="0" name="seg_start" value="{{printf "%.1f" $s.Start}}" class="time-input" aria-label="Segment start (seconds)">
                   <span class="range-sep">→</span>
@@ -67,6 +91,10 @@
             <span class="row-order">✂</span>
             <div class="row-main">
               <div class="row-meta">
+                <button type="button" class="row-jump"
+                        onclick="jumpTo(this)"
+                        title="Play this clip from the cut's start time"
+                        aria-label="Play this clip from the cut start">▶</button>
                 <span class="time-range">
                   <input type="number" step="0.1" min="0" name="cut_start" value="{{printf "%.1f" .Start}}" class="time-input" aria-label="Cut start (seconds)">
                   <span class="range-sep">→</span>
@@ -94,6 +122,10 @@
             <span class="row-order">R</span>
             <div class="row-main">
               <div class="row-meta">
+                <button type="button" class="row-jump"
+                        onclick="jumpTo(this)"
+                        title="Play this clip from the reel's start time"
+                        aria-label="Play this clip from the reel start">▶</button>
                 <span class="time-range">
                   <input type="number" step="0.1" min="0" name="reel_start" value="{{printf "%.1f" $.Manifest.ReelSegment.Start}}" class="time-input" aria-label="Reel start (seconds)">
                   <span class="range-sep">→</span>

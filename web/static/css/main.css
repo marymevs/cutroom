@@ -1142,3 +1142,96 @@ textarea:focus { border-color: var(--accent); }
   font-weight: normal;
   margin-bottom: 4px;
 }
+
+/* ── Inline clip video + jump button ────────────────────────────────── */
+
+.plan-clip-video-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  border-radius: 3px;
+  margin-left: auto;
+}
+.plan-clip-video-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent3);
+}
+
+.plan-clip-video {
+  width: 100%;
+  max-height: 360px;
+  background: #000;
+  margin: 0 0 14px;
+  border-radius: var(--radius);
+  display: block;
+}
+.plan-clip-video[hidden] {
+  display: none;
+}
+
+/* ▶ Jump button on each row — sits before the time inputs so the
+   "play from this timestamp" affordance reads left-to-right alongside
+   the time it'll seek to. */
+.row-jump {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  width: 26px;
+  height: 22px;
+  border-radius: 3px;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0;
+  margin-right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.row-jump:hover {
+  color: var(--accent);
+  border-color: var(--accent3);
+  background: rgba(240, 236, 226, 0.04);
+}
+
+/* ── Rendered output preview (done state) ───────────────────────────── */
+
+.output-preview {
+  margin: 16px 0 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.output-preview h3 {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  font-weight: normal;
+}
+.output-video {
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+  border-radius: var(--radius);
+  display: block;
+  margin-bottom: 10px;
+}
+.output-video--reel {
+  /* Reel is 9:16. Cap height so a tall reel doesn't take the page hostage. */
+  max-height: 520px;
+  width: auto;
+  max-width: 320px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.output-preview .download-btn {
+  display: inline-block;
+}

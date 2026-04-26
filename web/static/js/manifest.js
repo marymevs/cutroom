@@ -121,6 +121,82 @@
     closeCardPicker();
   }
 
+  // ── Inline clip video + per-row Jump (PR after #14) ────────────────
+  //
+  // Each .plan-clip-section holds a hidden <video class="plan-clip-video">
+  // pointing at the clip's signed GCS URL. The Show video toggle reveals
+  // it; each .plan-row's ▶ Jump button reads the row's start input,
+  // expands the video if hidden, seeks the video to that timestamp, and
+  // plays. Only one clip plays at a time — opening another pauses
+  // the rest.
+  //
+  // preload="metadata" on the <video> means the browser only fetches
+  // headers (~kilobytes) until something forces playback. Browser support
+  // for .MOV varies — Safari is fine, Chrome plays most H.264-MOV but
+  // fails on some HEVC variants, Firefox often fails. Best-effort: if
+  // playback errors, the user still sees a controls bar and can scrub
+  // the loaded portion.
+
+  function toggleClipVideo(btn) {
+    const section = btn.closest('.plan-clip-section');
+    if (!section) return;
+    const video = section.querySelector('video.plan-clip-video');
+    if (!video) return;
+    const open = !video.hidden;
+    if (open) {
+      video.pause();
+      video.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+      btn.textContent = '▶ Show video';
+    } else {
+      video.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+      btn.textContent = '▾ Hide video';
+    }
+  }
+
+  function jumpTo(btn) {
+    const row = btn.closest('.plan-row');
+    const section = btn.closest('.plan-clip-section');
+    if (!row || !section) return;
+
+    // The row's start input — works for seg_start, cut_start, reel_start.
+    const startInput = row.querySelector('input[name$="_start"]');
+    if (!startInput) return;
+    const t = parseFloat(startInput.value);
+    if (!isFinite(t)) return;
+
+    const video = section.querySelector('video.plan-clip-video');
+    if (!video) return;
+
+    // Make sure the video is visible — opening it via the toggle button
+    // keeps the toggle's aria-expanded state in sync.
+    if (video.hidden) {
+      const toggle = section.querySelector('.plan-clip-video-toggle');
+      if (toggle) toggleClipVideo(toggle);
+      else video.hidden = false;
+    }
+
+    // Pause every other clip's video so audio doesn't overlap.
+    document.querySelectorAll('video.plan-clip-video').forEach((v) => {
+      if (v !== video) v.pause();
+    });
+
+    // Seeking before metadata is loaded is unreliable; defer until the
+    // browser knows the duration.
+    const seek = () => {
+      try { video.currentTime = t; } catch (_) { /* range error — ignore */ }
+      video.play().catch(() => { /* user-gesture blocked, fine */ });
+    };
+    if (video.readyState >= 1) {
+      seek();
+    } else {
+      video.addEventListener('loadedmetadata', seek, { once: true });
+      // Trigger metadata load if the browser hasn't started yet.
+      try { video.load(); } catch (_) {}
+    }
+  }
+
   // Expose the inline-onclick targets to window so the swapped manifest
   // HTML can find them. Keep this list in sync with the onclick="…"
   // attributes in manifest_partial.html and card_picker_partial.html.
@@ -130,5 +206,7 @@
   window.closeCardPicker = closeCardPicker;
   window.filterCardPicker = filterCardPicker;
   window.selectCard = selectCard;
+  window.toggleClipVideo = toggleClipVideo;
+  window.jumpTo = jumpTo;
 
 })();

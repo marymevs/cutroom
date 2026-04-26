@@ -95,14 +95,43 @@
     {{end}}
   </div>
 
-  <!-- Downloads (shown when done) -->
+  <!-- Preview + Downloads (shown when done) -->
   {{if eq .Status "done"}}
   <section class="step step-done" id="step-download">
     <div class="step-label">Done ✓</div>
     <div class="step-body downloads">
-      {{if .OutputURL}}<a href="/projects/{{.ID}}/download?type=video" class="download-btn" download>Download Final Video</a>{{end}}
-      {{if .ReelsURL}}<a href="/projects/{{.ID}}/download?type=reel" class="download-btn reel" download>Download Reel (9:16)</a>{{end}}
-      {{if .CaptionURL}}<a href="/projects/{{.ID}}/download?type=captions" class="download-btn captions" download>Download Captions (.srt)</a>{{end}}
+
+      {{/* Preview the rendered outputs in-browser before committing to a
+           full download. preload="metadata" — bytes only flow when the
+           user hits play (or scrubs). The same signed GCS URLs used by
+           the download links are used as <video> sources. */}}
+      {{if .OutputURL}}
+      <div class="output-preview">
+        <h3>Final Video</h3>
+        <video class="output-video"
+               src="{{.OutputURL}}"
+               preload="metadata"
+               controls
+               playsinline></video>
+        <a href="/projects/{{.ID}}/download?type=video" class="download-btn" download>Download Final Video</a>
+      </div>
+      {{end}}
+
+      {{if .ReelsURL}}
+      <div class="output-preview output-preview--reel">
+        <h3>Reel (9:16)</h3>
+        <video class="output-video output-video--reel"
+               src="{{.ReelsURL}}"
+               preload="metadata"
+               controls
+               playsinline></video>
+        <a href="/projects/{{.ID}}/download?type=reel" class="download-btn reel" download>Download Reel</a>
+      </div>
+      {{end}}
+
+      {{if .CaptionURL}}
+      <a href="/projects/{{.ID}}/download?type=captions" class="download-btn captions" download>Download Captions (.srt)</a>
+      {{end}}
 
       {{if .Analysis}}
       <div class="titles-box">
